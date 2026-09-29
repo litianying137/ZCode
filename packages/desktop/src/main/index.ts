@@ -67,6 +67,7 @@ import {
   type Locale,
   type AppSettings,
   PlatformChannels,
+  ZCODE_AUTO_UPDATE_ENABLED,
   ZCODE_ENV,
   ZCODE_PRODUCT_FLAVOR,
   DEFAULT_ZCODE_ENDPOINT_ORIGIN,
@@ -955,10 +956,12 @@ function syncImmediateAppSettings(patch: Partial<AppSettings>) {
   if (typeof patch.receivePreviewUpdates === "boolean") {
     // receivePreviewUpdates 由 renderer host 写入 setting.json。
     // main 进程的自动更新器不会订阅 host 设置变化，必须借 syncAppSettings 这条即时通道刷新 manifest channel。
-    refreshAutoUpdaterReleaseChannel(
-      patch.receivePreviewUpdates,
-      "settings receivePreviewUpdates changed",
-    );
+    if (ZCODE_AUTO_UPDATE_ENABLED) {
+      refreshAutoUpdaterReleaseChannel(
+        patch.receivePreviewUpdates,
+        "settings receivePreviewUpdates changed",
+      );
+    }
   }
 
   if (patch.shortcutBindings !== undefined) {
@@ -2010,10 +2013,10 @@ app.whenReady().then(async () => {
   logWindowsBundledRuntimeIntegrityDiagnostic();
 
   // 启动自动更新检查（后台执行，不阻塞主界面）
-  // Preview 身份无论连接哪个后端都不自动更新：stable feed 上只分发正式 ZCode 安装包，
-  // 不向 Preview 渠道提供更新。
+  // 私有改造副本（opencode 身份）整体关闭自动更新：官方 feed 只分发 dev.zcode.app 身份的
+  // 安装包，命中更新会把 rebrand 身份整个覆盖回原样。升级走手动 rebase + 重新打包。
   void initAutoUpdater({
-    enabled: ZCODE_PRODUCT_FLAVOR === "production",
+    enabled: ZCODE_AUTO_UPDATE_ENABLED,
     onBeforeQuitAndInstall: async () => {
       notifyStabilityLifecycle("update_install");
       await prepareAppQuit("auto-update quitAndInstall", "update-install");
@@ -2255,8 +2258,12 @@ app.whenReady().then(async () => {
   // 是面向打包发布客户端的安全门，对未打包 dev 运行时无意义。打包版 app.isPackaged === true，
   // gate 照常生效，对真实用户零影响。
   const skipForceUpdateForLocalDevRuntime = !app.isPackaged;
+  // 强更 gate 的出路是自动升级；更新器已整体关闭时 gate 只会把启动锁死在一个
+  // 无法执行的“自动升级”按钮上，因此跟随更新能力一起停用。
   const forceUpdateGuardResult =
-    ZCODE_PRODUCT_FLAVOR === "production" && !skipForceUpdateForLocalDevRuntime
+    ZCODE_AUTO_UPDATE_ENABLED &&
+    ZCODE_PRODUCT_FLAVOR === "production" &&
+    !skipForceUpdateForLocalDevRuntime
       ? await maybeBlockStartupForForceUpdate({
           locale: currentApplicationLocale,
           logger,
@@ -2266,7 +2273,9 @@ app.whenReady().then(async () => {
           },
         })
       : { blocked: false };
-  if (ZCODE_PRODUCT_FLAVOR !== "production") {
+  if (!ZCODE_AUTO_UPDATE_ENABLED) {
+    logger.info("[force-update] 自动更新已关闭，跳过远端强制升级检查");
+  } else if (ZCODE_PRODUCT_FLAVOR !== "production") {
     logger.info("[force-update] Preview 跳过远端强制升级检查");
   } else if (skipForceUpdateForLocalDevRuntime) {
     logger.info("[force-update] 本地 dev 构建（未打包）跳过远端强制升级检查");
