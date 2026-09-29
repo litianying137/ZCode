@@ -5,21 +5,26 @@
  */
 export const ZCODE_PREVIEW_IDENTITY_ENV = "ZCODE_PREVIEW_IDENTITY";
 
+/**
+ * 产品身份权威值取自 opencode 官方源码（packages/desktop/electron-builder.config.ts）：
+ * prod → OpenCode / ai.opencode.desktop，beta → OpenCode Beta / ai.opencode.desktop.beta。
+ * 本仓库的 preview flavor 对应官方 beta 档位。
+ */
 const PRODUCTION_IDENTITY = Object.freeze({
   flavor: "production",
-  appId: "dev.zcode.app",
-  productName: "ZCode",
-  linuxExecutableName: "zcode",
-  linuxPackageName: "zcode",
+  appId: "ai.opencode.desktop",
+  productName: "OpenCode",
+  linuxExecutableName: "opencode",
+  linuxPackageName: "opencode",
   cuaHelperInstallVariant: null,
 });
 
 const PREVIEW_IDENTITY = Object.freeze({
   flavor: "preview",
-  appId: "dev.zcode.app.preview",
-  productName: "ZCode Preview",
-  linuxExecutableName: "zcode-preview",
-  linuxPackageName: "zcode-preview",
+  appId: "ai.opencode.desktop.beta",
+  productName: "OpenCode Beta",
+  linuxExecutableName: "opencode-beta",
+  linuxPackageName: "opencode-beta",
   cuaHelperInstallVariant: "preview",
 });
 
@@ -84,7 +89,7 @@ export function resolveDesktopArtifactSuffix(env = process.env) {
  */
 export function resolveWindowsAppUserModelIdForFlavor(flavor, runtime = { isPackaged: true }) {
   if (runtime.isPackaged === false) {
-    return "cn.aminer.zcode";
+    return "ai.opencode.desktop.dev";
   }
   return desktopProductIdentities[flavor === "preview" ? "preview" : "production"].appId;
 }

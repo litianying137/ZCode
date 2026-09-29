@@ -1,4 +1,6 @@
-const ZCODE_PROCESS_PREFIX = "zcode";
+// 进程展示名前缀取 opencode 官方小写风格（官方桌面子进程服务名即 "opencode server"）。
+// 常量名保留 ZCODE_ 前缀属于内部协议命名，不改。
+const ZCODE_PROCESS_PREFIX = "opencode";
 const MAX_PROCESS_NAME_SEGMENT_LENGTH = 24;
 
 function sanitizeProcessNameSegment(value: string | null | undefined): string | null {
@@ -49,7 +51,7 @@ export function formatZCodeHostProcessName(label?: string): string {
 
 export function formatZCodeRendererProcessName(windowTitle?: string): string {
   const normalizedTitle = windowTitle?.trim();
-  if (!normalizedTitle || normalizedTitle === "ZCode") {
+  if (!normalizedTitle || normalizedTitle === "OpenCode") {
     return joinZCodeProcessName("renderer", "main");
   }
 
@@ -57,7 +59,7 @@ export function formatZCodeRendererProcessName(windowTitle?: string): string {
     return joinZCodeProcessName("renderer", "resource-manager");
   }
 
-  const remoteWindowPrefix = "ZCode - ";
+  const remoteWindowPrefix = "OpenCode - ";
   if (normalizedTitle.startsWith(remoteWindowPrefix)) {
     return joinZCodeProcessName(
       "renderer",
