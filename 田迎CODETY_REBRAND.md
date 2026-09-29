@@ -819,3 +819,146 @@ codesign --force --deep --sign - /Applications/opencode.app
 - 活动监视器“进程名称”列不应是 `zcode-cli` / `zcode-node-repl-mcp`
 - 完整命令行参数中的 `zcode.cjs`、`zcode-media`、`ZCODE_*` 是内部兼容边界，刻意保留
 - UI 文案里如果出现 `ZCode`，属于另一个品牌文案清理任务，不应和进程名 / Bundle ID 混在一起全量替换
+
+## 15. 实施记录（2026-09-29，`Documents/AICodeAgent/ZCode` 工作副本）
+
+本节记录在该工作副本（上游 `main` @ `29628c9` 之上新建 `opencode` 分支）落地的完整改造。
+前文第 3–5 节描述的旧工作副本实现已被本节取代；命名以第 1.1 节官方值为准。
+
+### 15.1 提交结构
+
+```text
+74efb47 feat: disable auto-update and force-update gate for private opencode rebrand
+487a5d6 feat: rebrand desktop identity to opencode (official assets)
+```
+
+### 15.2 身份（对齐 opencode 官方值）
+
+| flavor | appId | 显示名 |
+| --- | --- | --- |
+| production | `ai.opencode.desktop` | `OpenCode` |
+| preview（=官方 beta） | `ai.opencode.desktop.beta` | `OpenCode Beta` |
+| dev / 未打包 | `ai.opencode.desktop.dev` | `OpenCode Dev` |
+
+- `packages/desktop/scripts/desktop-product-identity.mjs`、`packages/desktop/package.json`
+  （productName `OpenCode`）、`devElectronAppBundle.mjs`、Windows 未打包 AUMID、
+  About 对话框（`OpenCode Desktop App`）全部对齐。
+- **数据目录与显示名解耦**（第 2 节边界）：`desktopRuntimeEnv.ts` 新增
+  `runtimeDataDirName`（保持 zcode 原名 `ZCode` / `ZCode Dev` / `ZCode Preview`），
+  `runtimeUserDataPath` 由它派生；显示名改为 opencode 系不影响本地配置、登录态、
+  项目记录。`mcpUserDirectory/legacy.ts` 的旧目录迁移路径原样保留。
+
+### 15.3 进程 / 线程名
+
+- 前缀 `opencode`（`packages/shared/src/process-names.ts`），产物
+  `opencode-main` / `opencode-host-*` / `opencode-renderer-*` / `opencode-agent-*`；
+  窗口标题识别值 `OpenCode` 与 `"OpenCode - "`（`packages/web/src/main.tsx` 标题同步）。
+- CLI 子进程 `opencode-cli`（命令名 `zcode` 保留）；Node REPL MCP 子进程
+  `opencode-node-repl-mcp`（常量抽到 `process-title.ts`，server.ts 只导入）。
+- CUA Helper：`OpenCode Computer Use.app` / `ai.opencode.cua-helper`（dev 档同理）；
+  相关 i18n 文案同步。
+- 主进程 `process.title` / `app.setName` 用 `runtimeApplicationName`（OpenCode 系）。
+
+### 15.4 图标与视觉
+
+- `packages/desktop/build/` 与 `public/` 全部接入 opencode 官方 prod 资产
+  （`icon.icns` / `icon.ico` / `icon.png` + sips 重采样尺寸组；安装图标与应用图标一致），
+  SHA-256 锚定在 `packages/desktop/test/product-icon.test.mjs`。
+- **macOS icns 边距**（2026-09-29 修正）：官方 `icon.png` 是满幅 512 方块，直接转 icns
+  会让 Dock 图标比其他 app 大一圈。icns 与运行时 Dock 图标（`build/icon_dock.png`，
+  1024 画布 / 内容 824）都按 macOS 标准网格重合成，四周透明留白；规则见
+  `packages/desktop/specs/product-icon.md`。
+- **Dock 运行时覆盖**（2026-09-29 修正）：`applyAppIcon` 每次启动调用
+  `app.dock.setIcon(iconPath)`，会覆盖 bundle icns；darwin 的 `iconPath` 已改为指向
+  带边距的 `resources/icon_dock.png`（electron-builder extraResources 注入），
+  不能回退到满幅 `icon.png`。修改 Dock 图标后建议清一次图标缓存：
+  `rm -rf "$TMPDIR"/../C/com.apple.iconservices* && killall Dock Finder`。
+- DMG 背景 540x380 / 1080x760 由 Swift + AppKit 重绘（浅底 + OPENCODE 字样 + 拖拽箭头），
+  生成脚本思路记录于本节；旧 ZCODE 背景已废弃。
+- 应用内品牌组件移植 opencode 官方 `logo.tsx` 的 Mark（16x20）与字标（234x42），
+  currentColor + 透明度（weak 0.35 / base 0.85 / strong 1）：
+  `ZCodeAboutLogo.tsx`（组件名保留）、`RootStartupLoading.tsx`、
+  `ConversationDraftEmptyState.tsx`（水印不再分明暗两套资源，`Z.svg` 引用移除）、
+  `index.html` 首屏、`aboutWindow.ts`（自定义 About 对话框，旧 Z 字形已替换）、
+  `packages/web/index.html`（Web 启动页 + `<title>`）、
+  新增 `opencode-mark-badge.svg`（顶栏 / 侧栏小徽标）。
+- `provider-icons/logo-zai.svg` 是 Z.ai OAuth 供应商图标，与应用品牌无关，保留。
+
+### 15.5 文案
+
+- i18n 值（en-US / zh-CN 各约 100 行）、桌面菜单值、About、Finder"在 OpenCode 中打开"
+  工作流、安装器日志文件名（`OpenCode-installer.log`）全部切换；
+  **键名与内部协议（`ZCODE_*`、`zcode://`、`zcode.cjs`、CLI 命令 `zcode`、消息键
+  `toggleZCodeStdioTap` 等）保持不变**。
+
+### 15.6 规格与测试
+
+```text
+packages/desktop/specs/desktop-product-identity.md
+packages/desktop/specs/product-icon.md
+packages/desktop/specs/auto-update-policy.md
+packages/shared/specs/process-names.md
+packages/desktop/test/desktop-product-identity.test.mjs
+packages/desktop/test/product-icon.test.mjs
+packages/desktop/test/auto-update-policy.test.mjs
+packages/shared/test/process-names.test.ts
+apps/zcode-cli/packages/cli/test/process-name.test.ts
+apps/zcode-cli/packages/node-repl-host/test/process-title.test.ts
+```
+
+### 15.7 验证记录
+
+```text
+回归测试：28/28 通过（身份 8 + 图标 7 + 自动更新 7 + 进程名 6）
+pnpm typecheck：通过
+oxlint：改动文件 0 errors，无新增 warnings（上游历史 warnings 保留）
+oxfmt --check：改动文件全部通过
+architecture:check --changed：OK，0 violations
+```
+
+### 15.8 打包
+
+三次打包均在 `opencode` 分支完成，命令见第 6.1 节（改源码后用 `--skip-prepare`；
+只换资源用 `--skip-prepare --skip-build`；注意本机无 mise，需
+`PATH=/tmp/pnpm-bin:$PATH` 提供 pnpm shim）。
+
+最终产物与验证（2026-09-29）：
+
+```text
+packages/desktop/dist/OpenCode-3.14.3-mac-arm64.dmg（169 MiB，审计上限 500 MiB）
+packages/desktop/dist/OpenCode-3.14.3-mac-arm64.zip
+/Applications/OpenCode.app（已安装）
+```
+
+```text
+CFBundleIdentifier / CFBundleName / CFBundleDisplayName：ai.opencode.desktop / OpenCode
+codesign --verify --deep --strict：通过（ad-hoc）
+包内 index.html：<title>OpenCode</title>，opencode Mark，无旧 Z 字形
+进程名（运行中实测）：OpenCode / OpenCode Helper (Renderer) /
+  opencode-host-local-1 / opencode-cli / opencode-node-repl-mcp
+userData：沿用 ~/Library/Application Support/ZCode（零迁移），未产生 OpenCode 目录
+Dock 图标：与其他 app 同大小（icns + icon_dock.png 双保险，均有 824/1024 边距）
+About 对话框：opencode Mark（aboutWindow.ts）
+```
+
+### 15.9 仓库体积与清理（2026-09-29）
+
+全量构建后仓库约 5.4G；清理可再生构建产物后 3.9G（省约 1.5G）：
+
+| 路径 | 大小 | 说明 |
+| --- | --- | --- |
+| `packages/desktop/mock-cdn` | 765M | prepare:runtime-assets 重新下载/重建 |
+| `packages/desktop/dist/mac-arm64` | 301M | 未压缩 .app 副本（保留 dist 下 dmg/zip 交付物） |
+| `packages/desktop/out` | 153M | vite 构建输出 |
+| `packages/*/dist`（ui/server/services/shared 等） | ~71M | tsc 输出，构建时重建 |
+
+保留：`node_modules`（2.6G，删除则下次构建需 ~27 分钟重装）、`apps/zcode-cli` 下的
+node_modules / tools / dependencies（248M+，构建输入）、`.git`（42M）。
+以上清理目标均在 .gitignore 内，`git status` 保持干净。
+
+### 15.10 环境备注
+
+- 本机无 mise；用系统 Node 26.4.0 + corepack pnpm@10.33.2 完成安装与构建。
+  系统 corepack 过旧需 `COREPACK_INTEGRITY_KEYS=0` 绕过验签。
+- `ssh2` 可选加密绑定在 Node 26 下编译失败（optional 依赖，不影响功能）。
+- 上游快照自带 34 个 oxfmt 不合规文件与 70 条 oxlint warnings，均为存量，不处理。

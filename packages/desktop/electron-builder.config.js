@@ -598,6 +598,17 @@ export default {
       from: "build/icon.png",
       to: "icon.png",
     },
+    ...(targetPlatform.os === "darwin"
+      ? [
+          {
+            // macOS Dock 图标专用：内容占 824/1024 + 透明留白（标准图标网格）。
+            // 运行时 app.dock.setIcon 会覆盖 bundle icns，必须用带边距的 PNG，
+            // 否则满幅 icon.png 会让 Dock 图标比其他 app 大一圈。
+            from: "build/icon_dock.png",
+            to: "icon_dock.png",
+          },
+        ]
+      : []),
     ...(targetPlatform.os === "linux"
       ? [
           {

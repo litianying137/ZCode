@@ -12,13 +12,17 @@ const sha256 = (relativePath) => createHash("sha256").update(read(relativePath))
 
 // 锚定 opencode 官方 prod 图标（opencode/packages/desktop/icons/prod/），
 // 防止图标被替换回本地生成素材或旧 ZCode 图标。
+// icns 是官方 512 源按 macOS 标准网格（内容 824/1024 + 透明留白）重合成的，
+// 避免满幅图标在 Dock 中比其他 app 大一圈（opencode 官方 README 记录了同样的问题）。
 const OFFICIAL_SHA256 = {
   "packages/desktop/build/icon.icns":
-    "0c6c7f9481ec4a1e3f8df934ba41baa525c86fd5046d69a3dc8de8caac61d955",
+    "3307859d3604ec84ad3fd29d9ac03734b392b5cacef7c0d81b992cd25fa10f9d",
   "packages/desktop/build/icon.ico":
     "1e06bbd99bd63c3ce5a0241ff2aea61ac7b8cf1d97728845eb212cb59343edc0",
   "packages/desktop/build/icon.png":
     "324bd6ab9499f006519209eaa883519f37b9373a59d6eb01235189d4ac67ea27",
+  "packages/desktop/build/icon_dock.png":
+    "9fa6e8abdd23d56ee8f90adf150a3a33c4719991d29e33e174a8bd396b02641d",
 };
 
 for (const [relativePath, expected] of Object.entries(OFFICIAL_SHA256)) {
@@ -57,6 +61,8 @@ test("应用内品牌组件使用 opencode 官方 Mark，Z 字形不回潮", () 
     "packages/ui/src/root/RootStartupLoading.tsx",
     "packages/ui/src/v4/ConversationDraftEmptyState.tsx",
     "packages/desktop/src/renderer/index.html",
+    "packages/desktop/src/main/aboutWindow.ts",
+    "packages/web/index.html",
   ]) {
     const source = read(relativePath).toString("utf8");
     assert.match(
@@ -70,6 +76,29 @@ test("应用内品牌组件使用 opencode 官方 Mark，Z 字形不回潮", () 
       `${relativePath} 回到了旧 ZCode 字形`,
     );
   }
+});
+
+test("macOS Dock 图标用带边距的 icon_dock.png，不得回退满幅 icon.png", () => {
+  const iconDock = read("packages/desktop/build/icon_dock.png");
+  // 1024 画布；内容边距由 sha256 锚定（PNG 像素在 IDAT 内压缩，无法按偏移断言）
+  assert.equal(iconDock.readUInt32BE(16), 1024);
+  assert.equal(iconDock.readUInt32BE(20), 1024);
+
+  const mainIndex = read("packages/desktop/src/main/index.ts").toString("utf8");
+  const iconPathBlock = mainIndex.match(/const iconPath =[\s\S]*?;\n/);
+  assert.ok(iconPathBlock, "未找到 iconPath 定义");
+  assert.match(
+    iconPathBlock[0],
+    /darwin[\s\S]*?icon_dock\.png/,
+    "darwin 的 iconPath 必须指向 icon_dock.png（运行时 dock.setIcon 会覆盖 icns）",
+  );
+
+  const builderConfig = read("packages/desktop/electron-builder.config.js").toString("utf8");
+  assert.match(
+    builderConfig,
+    /from: "build\/icon_dock\.png",\s*\n\s*to: "icon_dock\.png"/,
+    "electron-builder 必须把 icon_dock.png 打进 resources",
+  );
 });
 
 test("顶栏小徽标是 opencode mark badge", () => {
