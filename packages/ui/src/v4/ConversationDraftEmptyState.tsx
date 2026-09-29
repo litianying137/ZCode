@@ -1,11 +1,10 @@
 /**
- * 草稿态空态问候：时间问候语 + ZCode Logo。
+ * 草稿态空态问候：时间问候语 + opencode Logo。
  * 自旧版 ChatView/ChatViewEmptyState.tsx 恢复（该组件随旧 ChatView 删除，
  * i18n key `chat.empty.greeting.*` 一直保留）；边界时刻自动换档逻辑保真。
  * 手机远控复用同一组件，但继续保留 20px 紧凑标题；桌面草稿首页才按标题自身宽度适配。
  */
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from "react";
-import darkEmptyStateLogoUrl from "@/assets/Z.svg";
 import { cn } from "@/components/lib/utils.js";
 import { useZCodeIntl } from "@/i18n/IntlProvider.js";
 import { useIsOfficeMode } from "@/hooks/useInterfaceMode.js";
@@ -211,37 +210,26 @@ export function ConversationDraftEmptyState({ className }: { className?: string 
 
 function ZCodeEmptyStateLogo({ className }: { className?: string }) {
   return (
-    <>
-      {/* 夜间资源已自带渐变和透明度，公共容器叠加遮罩会让它重复变淡；渐隐效果只属于浅色线框。*/}
-      <svg
-        aria-hidden="true"
-        className={cn(
-          className,
-          "opacity-70 dark:hidden",
-          "[-webkit-mask-image:linear-gradient(to_bottom,black_0%,transparent_70%,transparent_100%)]",
-          "[-webkit-mask-repeat:no-repeat] [-webkit-mask-size:100%_100%]",
-          "[mask-image:linear-gradient(to_bottom,black_0%,transparent_70%,transparent_100%)]",
-          "[mask-repeat:no-repeat] [mask-size:100%_100%]",
-        )}
-        width="400"
-        height="320"
-        viewBox="0 0 400 320"
-        fill="none"
-        xmlns="http://www.w3.org/2000/svg"
-      >
-        <path
-          d="M398.97 0.5L147.576 319.5H1.03027L37.5996 273.081L120.167 169.603L120.171 169.598L215.342 47.5605L215.343 47.5615L252.424 0.5H398.97ZM264.544 273.271H372.527L336.082 319.498H189.886L202.642 303.307C217.584 284.34 240.398 273.271 264.544 273.271ZM209.164 0.5L202.786 8.58887C183.782 32.6885 154.782 46.752 124.091 46.752H25.9805L62.4268 0.5H209.164Z"
-          stroke="currentColor"
-        />
-      </svg>
-      {/* 深色资源包含专用渐变与模糊效果，不能通过 currentColor 复刻；主题类保证两套 Logo 互斥显示。 */}
-      <img
-        aria-hidden="true"
-        className={cn(className, "hidden dark:block")}
-        data-v4-draft-logo="dark"
-        src={darkEmptyStateLogoUrl}
-        alt=""
-      />
-    </>
+    // opencode 官方 Mark（opencode/packages/ui/src/components/logo.tsx）。
+    // 用 currentColor 跟随主题文字色，配合渐隐 mask 做水印；不再区分明暗两套资源。
+    <svg
+      aria-hidden="true"
+      className={cn(
+        className,
+        "opacity-60",
+        "[-webkit-mask-image:linear-gradient(to_bottom,black_0%,transparent_70%,transparent_100%)]",
+        "[-webkit-mask-repeat:no-repeat] [-webkit-mask-size:100%_100%]",
+        "[mask-image:linear-gradient(to_bottom,black_0%,transparent_70%,transparent_100%)]",
+        "[mask-repeat:no-repeat] [mask-size:100%_100%]",
+      )}
+      width="250"
+      height="312"
+      viewBox="0 0 16 20"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path d="M12 16H4V8H12V16Z" fill="currentColor" opacity="0.35" />
+      <path d="M12 4H4V16H12V4ZM16 20H0V0H16V20Z" fill="currentColor" />
+    </svg>
   );
 }
