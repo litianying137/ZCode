@@ -278,14 +278,20 @@ process.on("unhandledRejection", (reason) => {
   logger.error("unhandledRejection:", reason);
 });
 
+// macOS 上 app.dock.setIcon(iconPath) 会覆盖 bundle icns；满幅 icon.png 会让 Dock 图标
+// 比其他 app 大一圈，因此 darwin 一律使用带标准边距（内容 824/1024）的 icon_dock.png。
 const iconPath =
   process.platform === "win32"
     ? app.isPackaged
       ? join(process.resourcesPath, "icon_windows.png")
       : join(import.meta.dirname, "../../build/icon_windows.png")
-    : app.isPackaged
-      ? join(process.resourcesPath, "icon.png")
-      : join(import.meta.dirname, "../../build/icon.png");
+    : process.platform === "darwin"
+      ? app.isPackaged
+        ? join(process.resourcesPath, "icon_dock.png")
+        : join(import.meta.dirname, "../../build/icon_dock.png")
+      : app.isPackaged
+        ? join(process.resourcesPath, "icon.png")
+        : join(import.meta.dirname, "../../build/icon.png");
 const linuxDesktopIntegrationIconPath =
   process.platform === "linux"
     ? app.isPackaged
@@ -1338,7 +1344,7 @@ function confirmAppQuit(originWindow?: BrowserWindow | null) {
     defaultId: 1,
     cancelId: 1,
     title: isZh ? "退出确认" : "Confirm Quit",
-    message: isZh ? "确认退出 Z Code?" : "Quit Z Code?",
+    message: isZh ? "确认退出 OpenCode?" : "Quit OpenCode?",
     detail: detailLines.join("\n"),
     icon: nativeImage.createFromPath(iconPath),
   };
