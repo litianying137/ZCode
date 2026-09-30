@@ -10,6 +10,7 @@ import type {
   ResolvedModelApiCallObservation,
 } from "@zcode/contracts";
 import { ModelApiActorKind, ModelApiOperation, ModelRequestSessionType } from "@zcode/contracts";
+import { isZCodeOwnedBaseUrl } from "@zcode/shared";
 import { isOpenCodeGoBaseUrl } from "./opencode-session.js";
 import type { ModelStatusContext } from "./runner-status.js";
 
@@ -24,6 +25,11 @@ const SESSION_ID_INTERNAL_PREFIX = "sess_";
 const SESSION_ID_SUBAGENT_PREFIX = "subagent_agent_";
 const QUERY_ID_INTERNAL_PREFIX = "query_";
 
+// zcode 命名的归因 header 只发给 z.ai / bigmodel.cn 自有域：Coding Plan 服务端依赖
+// x-zcode-session-type 路由，自有后端本来就认识本客户端。第三方 openai-compatible
+// 供应商（自定义 baseURL）不应通过 header 名识别出客户端是 zcode（rebrand 隐私边界，
+// 见仓库根 田迎CODETY_REBRAND.md）。域名判定复用 shared 的 isZCodeOwnedBaseUrl。
+
 export function createModelRequestAttributionHeaders(
   statusContext: ModelStatusContext,
 ): Record<string, string> {
@@ -32,13 +38,20 @@ export function createModelRequestAttributionHeaders(
   const openCodeSessionHeaderValue = isOpenCodeGoBaseUrl(statusContext.baseURL)
     ? sessionHeaderValue
     : undefined;
+  const zcodeOwnedEndpoint = isZCodeOwnedBaseUrl(statusContext.baseURL);
   // 只把跨 provider 网络边界需要的观测归因字段写入 header，span 等细粒度信息仍留在事件和日志里。
   return {
     [MODEL_REQUEST_HEADER]: statusContext.requestId,
-    [MODEL_SESSION_TYPE_HEADER]: isModelRequestSessionType(statusContext.modelRequestSessionType)
-      ? statusContext.modelRequestSessionType
-      : ModelRequestSessionType.Other,
-    [MODEL_TRACE_HEADER]: statusContext.traceId,
+    ...(zcodeOwnedEndpoint
+      ? {
+          [MODEL_SESSION_TYPE_HEADER]: isModelRequestSessionType(
+            statusContext.modelRequestSessionType,
+          )
+            ? statusContext.modelRequestSessionType
+            : ModelRequestSessionType.Other,
+          [MODEL_TRACE_HEADER]: statusContext.traceId,
+        }
+      : {}),
     ...(queryHeaderValue ? { [MODEL_QUERY_HEADER]: queryHeaderValue } : {}),
     ...(sessionHeaderValue ? { [MODEL_SESSION_HEADER]: sessionHeaderValue } : {}),
     ...(openCodeSessionHeaderValue ? { "x-opencode-session": openCodeSessionHeaderValue } : {}),

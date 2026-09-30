@@ -962,3 +962,65 @@ node_modules / tools / dependencies（248M+，构建输入）、`.git`（42M）�
   系统 corepack 过旧需 `COREPACK_INTEGRITY_KEYS=0` 绕过验签。
 - `ssh2` 可选加密绑定在 Node 26 下编译失败（optional 依赖，不影响功能）。
 - 上游快照自带 34 个 oxfmt 不合规文件与 70 条 oxlint warnings，均为存量，不处理。
+- 清理 `packages/*/dist` 后需同步删除各处 `*.tsbuildinfo`，否则 `tsc -b` 报 TS6305。
+
+### 15.11 对外身份与供应商可见性（2026-09-29 第二轮清查）
+
+两条目标：①使用者看不到 zcode 文案与图标；②被调用的 AI 供应商无法从请求内容识别出
+客户端是 zcode。
+
+#### 使用者可见残留（本轮清理）
+
+```text
+packages/ui/src/lib/builtinSkillI18n.ts                    技能描述 ×6（同时会进提示词）
+packages/ui/src/v4/ConversationShareReadonlyTimeline.tsx   分享页"更新 ZCode 查看" ×2
+packages/ui/src/lib/zcodeUiError.ts                        "ZCode session failed"
+packages/ui/src/v4/conversationProjectionStore.tsx          运行时回收错误文案
+packages/web/src/share/*                                    分享落地页文案与品牌字
+packages/web/src/auth/webAuthLocale.ts                      Web 登录页 brand
+apps/zcode-cli/packages/i18n/src/locales/*.ts              CLI 启动文案 ×2
+packages/shared feedback / zcode-agent-policy / ui feedback "ZCode Agent" 标签
+packages/services bots + packages/server http               bot webhook header / 事件类型
+apps/zcode-cli adapters auth/cli 错误信息                   凭据/配置定位错误文案
+```
+
+#### 发给 AI 供应商的内容（本轮清理）
+
+- **系统提示词**（`apps/zcode-cli/packages/core/src/context/sections/` 与 core 其他模板）：
+  `identity.ts`（"You are an interactive OpenCode agent"）、`cli-prefix.ts`
+  （"You are OpenCode, an interactive coding agent"）、`desktop.ts`
+  （"# OpenCode Desktop Context"）、Explore 子代理身份、连接探测、peer 会话消息模板、
+  会话引用与 read-session 工具描述、"## My request for OpenCode"——此前模型可直接从
+  prompt 看到客户端自称 ZCode。
+- **模型请求 source headers**（`packages/shared/src/zcode-source-headers.ts` +
+  `apps/zcode-cli/packages/adapters/src/model/model-execution.ts`）：
+  `User-Agent: ZCode/<版本>`、`X-Title: Z Code@...`、`HTTP-Referer: zcode.z.ai`、
+  `X-ZCode-App-Version`、`X-ZCode-Agent` 原本发给所有供应商；现按 baseURL 分流
+  （`scopeZCodeSourceHeadersForBaseUrl`）——z.ai / bigmodel.cn 自有域保留全集
+  （Coding Plan 后端依赖这些归因做识别与路由），第三方剥离 zcode 命名与 Referer，
+  UA / X-Title 换成 `OpenCode/<版本>` / `OpenCode@<来源>`。
+- **模型请求归因 header**（`apps/zcode-cli/packages/adapters/src/model/runner-attribution.ts`）：
+  `x-zcode-trace-id` / `x-zcode-session-type` 同样仅发往自有域；第三方只收到中性的
+  `x-request-id` / `x-session-id` / `x-query-id`。域名判定统一用 shared 的
+  `isZCodeOwnedBaseUrl`。回归测试：`apps/zcode-cli/packages/adapters/test/runner-attribution.test.ts`。
+- **WebFetch User-Agent**：`ZCode-WebFetch/0.1 (+https://zcode.ai)` →
+  `OpenCode-WebFetch/0.1 (+https://opencode.ai)`（agent 抓取的每个网站可见）。
+- **GitHub 插件安装器 UA**：`ZCode-Plugin-Installer` → `OpenCode-Plugin-Installer`。
+- **Bot webhook**：`x-zcode-bot-secret` → `x-opencode-bot-secret`，事件类型
+  `zcode.bot.*` → `opencode.bot.*`（两端都在本仓库，自包含协议）。
+- Electron / webview User-Agent 由 app.name 派生，已随身份变为 OpenCode。
+
+#### 刻意保留的边界（第三方供应商看不到 / 属于内部协议）
+
+- `~/.zcode`、`~/Library/Application Support/ZCode` 数据目录与 `.zcodeignore` 文件名
+  （真实路径，本地配置零迁移优先于改名）；
+- `zcode://` scheme、CLI 命令 `zcode`、`zcode.cjs`、`ZCode Protocol`、`ZCODE_*` 环境变量、
+  `ZCODE_RPC_*` header（仅本机 IPC）；
+- `logo-zai.svg`：Z.ai OAuth 供应商图标（供应商选择列表，语义正确）；
+- 指向 zcode 自有后端的 `x-zcode-*` header（plugin marketplace / intranet token 等）；
+- OAuth `client_id`（ZAI_OAUTH_CLIENT_ID）：z.ai 自家账号体系，无法也不需要隐藏。
+
+#### 已知灰区（如需进一步收紧再评估）
+
+- CLI 帮助文案中保留 "ZCode Protocol" 字样（协议真实名称；CLI 非桌面端主要界面）。
+- 登录浏览器地址栏会出现 `zcode://` 回调 scheme（改 scheme 牵动 OAuth 回调链路）。

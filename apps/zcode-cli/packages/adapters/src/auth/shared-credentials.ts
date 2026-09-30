@@ -297,7 +297,7 @@ async function readRawCredentialRecord(filePath: string): Promise<Record<string,
     if (getErrorCode(error) === "ENOENT") {
       return {};
     }
-    throw new Error(`Unable to read shared ZCode credentials: ${filePath}`, { cause: error });
+    throw new Error(`Unable to read shared OpenCode credentials: ${filePath}`, { cause: error });
   }
 
   try {
