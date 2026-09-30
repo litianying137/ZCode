@@ -61,7 +61,8 @@ const enUS: Record<string, string> = {
   "occupationOnboarding.migration": "Migrate conversations",
   "occupationOnboarding.migrationDescription": "Migrate conversation history from Claude Code",
   "occupationOnboarding.memory": "Enable Workspace Memory",
-  "occupationOnboarding.memoryDescription": "Let OpenCode remember your preferences and work context.",
+  "occupationOnboarding.memoryDescription":
+    "Let OpenCode remember your preferences and work context.",
   "occupationOnboarding.suggestions": "Enable proactive task suggestions",
   "occupationOnboarding.suggestionsDescription":
     "Show suggestions in new conversations. Click to fill the composer.",
@@ -632,7 +633,7 @@ const enUS: Record<string, string> = {
   "bots.setup.guide.webhook.bind.2":
     'The payload should at least include this botId, a stable userId, `chatType: "private"`, and set text to {command}.',
   "bots.setup.guide.webhook.bind.3":
-    "If the bot uses a secret, also send `x-zcode-bot-secret`; then return here after the bind succeeds.",
+    "If the bot uses a secret, also send `x-opencode-bot-secret`; then return here after the bind succeeds.",
   "bots.setup.footer.choose": "Choose a supported bot to continue.",
   "bots.setup.footer.create": "Connectivity must pass before binding.",
   "bots.setup.testSuccess": "Connectivity test passed",
@@ -3553,7 +3554,8 @@ const enUS: Record<string, string> = {
   "sidebar.usage.plan.toolCalls": "Tool calls",
   "sidebar.usage.plan.mcp": "OpenCode MCP",
   "sidebar.usage.plan.zcodeMcp": "OpenCode MCP",
-  "sidebar.usage.plan.zcodeMcpDescription": "Daily aggregate quota for OpenCode built-in plugin MCPs",
+  "sidebar.usage.plan.zcodeMcpDescription":
+    "Daily aggregate quota for OpenCode built-in plugin MCPs",
   "chat.planUsage.title": "Plan usage",
   "chat.planUsage.titleWithPlan": "{plan} Plan usage",
   "chat.planUsage.providerFallback": "Current provider",
