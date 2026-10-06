@@ -112,6 +112,22 @@ cp /tmp/terminal-sim.mjs . && node ./terminal-sim.mjs "<qrUrl>" [delayMs]
 配对后 `state waiting_terminal -> paired` → `data frame: zcode_type=bootstrap-request`
 → `send data zcode_type=bootstrap-response ... wsOpen=true`。
 
+## 5.1 最终全链路验证（2026-10-06 23:5x，commit 5534c0f）
+
+| 阶段 | 结果 |
+| --- | --- |
+| 扫码配对（matched） | ✅ relay 需要 device WS 带 `?mid=` query（根因修复） |
+| 首页工作区+任务计数 | ✅ 6 工作区 · 15 任务，与 tasks-index.sqlite 一致 |
+| bridge rpc-frame 双向 | ✅ AcknowledgedRelayProtocol 移植（分片/ACK/重放） |
+| 任务详情（完整会话历史） | ✅ 点开任务渲染对话/工具调用/表格/文件引用 |
+| app 重启恢复 | ✅ 持久化 sid + SPA Try Again 自动重连 |
+| 刷新/主题等交互 | ✅ |
+
+关键实现：
+- `webRemoteControlRpcTransport.ts`：旧版协议类型化移植 + 4 单测
+- `webRemoteControlTaskIndex.ts`：windowWorkspaceMap 工作区 + tasks-index 只读查询
+- relay 撮合前提：device WS URL 必须带 `?mid=<deviceMid>`（旧版 endpoint resolver 行为）
+
 ## 6. 剩余工作（下一阶段）
 
 1. **rpc-frame 桥**（核心）：`new MessageChannelMain()` → host
