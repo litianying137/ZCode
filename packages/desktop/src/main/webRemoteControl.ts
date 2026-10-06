@@ -408,6 +408,200 @@ class RelayClient {
 
 let client: RelayClient | null = null;
 
+// ── 控制载荷路由（data 帧 → 本地服务）──
+
+// 每 10s 推送 workspace-list-updated。旧版通过对比签名避免冗余推送。
+let workspaceListPushTimer: NodeJS.Timeout | null = null;
+function scheduleWorkspaceListPush(): void {
+  if (workspaceListPushTimer) return;
+  workspaceListPushTimer = setInterval(() => {
+    if (!client) {
+      clearInterval(workspaceListPushTimer!);
+      workspaceListPushTimer = null;
+      return;
+    }
+    const status = client.getStatus();
+    if (status.state !== "paired") return;
+    safeLog("[web-remote-control] push workspace list updated");
+    client.sendPayload({
+      zcode_type: "workspace-list-updated",
+      result: buildWorkspaceList(),
+    });
+  }, 10_000);
+}
+
+function routeControlPayload(payload: Record<string, unknown>): void {
+  const ztype = payload.zcode_type as string;
+  switch (ztype) {
+    case "bootstrap-request": {
+      const requestId = payload.requestId as string;
+      sendToRelay({
+        zcode_type: "bootstrap-response",
+        requestId,
+        success: true,
+        result: buildBootstrapResult(),
+      });
+      break;
+    }
+    case "workspace-list-request": {
+      const requestId = payload.requestId as string;
+      sendToRelay({
+        zcode_type: "workspace-list-response",
+        requestId,
+        success: true,
+        result: buildWorkspaceList(),
+      });
+      break;
+    }
+    case "workspace-bridge-open": {
+      safeLog(`[web-remote-control] workspace-bridge-open received: workspaceKey=${payload.workspaceKey as string} bridgeSessionId=${payload.bridgeSessionId as string}`);
+      // 手机请求打开某个工作区的 bridge。旧版经 host MessagePort 建双向 RPC 桥
+      // （rpc-frame ⇄ AcknowledgedRelayProtocol ⇄ host ServiceCollection）。
+      // 当前简化实现：直接回复 workspace-bridge-ready（stub bridge，无 rpc-frame 通道），
+      // 手机 SPA 可进入工作区界面，但无实时数据推送。
+      handleWorkspaceBridgeOpen(payload).catch((err) => {
+        safeLog(`[web-remote-control] workspace-bridge-open failed: ${err.message}`);
+        sendToRelay({
+          zcode_type: "workspace-bridge-error",
+          requestId: payload.requestId as string,
+          bridgeSessionId: payload.bridgeSessionId as string,
+          ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
+          reason: "not-implemented",
+          error: err.message,
+        });
+      });
+      break;
+    }
+    case "workspace-reconnect-request": {
+      sendToRelay({
+        zcode_type: "workspace-reconnect-response",
+        requestId: payload.requestId as string,
+        workspaceKey: payload.workspaceKey as string,
+        success: false,
+        error: "not-implemented",
+      });
+      break;
+    }
+    case "platform-request": {
+      const requestId = payload.requestId as string;
+      const method = payload.method as string;
+      safeLog(`[web-remote-control] platform request: method=${method} args=${JSON.stringify(payload.args as unknown).slice(0, 500)}`);
+      try {
+        const result = handlePlatformRequest(method, payload.args as Record<string, unknown> | undefined);
+        sendToRelay({
+          zcode_type: "platform-response",
+          requestId,
+          method,
+          success: true,
+          result,
+        });
+      } catch (err) {
+        sendToRelay({
+          zcode_type: "platform-response",
+          requestId,
+          method,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+    case "mobile-view-state-update": {
+      safeLog(`[web-remote-control] mobile view state update: ${JSON.stringify(payload.viewState as Record<string, unknown>).slice(0, 200)}`);
+      break;
+    }
+    case "telemetry-report": {
+      // 静默忽略
+      break;
+    }
+    case "mobile-diagnostic": {
+      safeLog(`[web-remote-control] mobile diagnostic: ${JSON.stringify(payload as Record<string, unknown>).slice(0, 300)}`);
+      break;
+    }
+    default:
+      safeLog(`[web-remote-control] unhandled payload type: ${ztype}`);
+  }
+}
+
+function sendToRelay(payload: Record<string, unknown>): void {
+  if (!client) return;
+  const status = client.getStatus();
+  if (status.state !== "paired" && status.state !== "waiting_terminal") return;
+  client.sendPayload(payload);
+}
+
+function buildBootstrapResult(): Record<string, unknown> {
+  return {
+    windowControlSessionId: client?.getStatus().deviceSid ?? "unknown",
+    desktopAppVersion: ZCODE_VERSION,
+    workspaces: getWorkspaces(),
+    tasks: [],
+    initialViewState: null,
+    mobileViewState: null,
+  };
+}
+
+function buildWorkspaceList(): Record<string, unknown> {
+  return {
+    workspaces: getWorkspaces(),
+    tasks: [],
+    activeWorkspaceKey: getWorkspaces()[0]?.workspacePath ?? null,
+    activeTaskId: null,
+  };
+}
+
+function getWorkspaces(): Record<string, unknown>[] {
+  const windows = BrowserWindow.getAllWindows();
+  if (windows.length === 0) {
+    return [];
+  }
+  // 从所有窗口收集工作区。简单实现：返回一个本地工作区条目。
+  return [
+    {
+      kind: "local",
+      workspacePath: "default",
+      workspaceIdentity: undefined,
+      connectionState: "connected",
+    },
+  ];
+}
+
+async function handleWorkspaceBridgeOpen(payload: Record<string, unknown>): Promise<void> {
+  const bridgeSessionId = payload.bridgeSessionId as string;
+  const workspaceKey = payload.workspaceKey as string;
+  // 简版：回复 bridge-ready 但不建立实际 host bridge（让手机 SPA 进入 UI 界面但不推送数据）
+  sendToRelay({
+    zcode_type: "workspace-bridge-ready",
+    requestId: payload.requestId as string,
+    bridgeSessionId,
+    ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
+    bridge: {
+      bridgeSessionId,
+      bridgeGeneration: (payload.bridgeGeneration as number) ?? 0,
+      workspaceKey,
+      workspacePath: workspaceKey,
+      kind: "local",
+    },
+  });
+  safeLog(`[web-remote-control] workspace bridge ready (stub) session=${bridgeSessionId} workspace=${workspaceKey}`);
+}
+
+function handlePlatformRequest(method: string, args: Record<string, unknown> | undefined): unknown {
+  switch (method) {
+    case "focus":
+      // 手机要求桌面窗口前置
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.focus();
+          break;
+        }
+      }
+      return true;
+    default:
+      throw new Error(`Unimplemented platform method: ${method}`);
+  }
+}
+
 export function startWebRemoteControl(): RelayStatus {
   if (client) {
     return client.getStatus();
