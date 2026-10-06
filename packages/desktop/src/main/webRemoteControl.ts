@@ -8,7 +8,7 @@
  * relay WS 地址：endpoint origin 为 zcode.z.ai 时用 wss://zcode.z.ai/ws
  * mobile URL base：${endpointOrigin}/remote/v4
  */
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -37,10 +37,9 @@ function createPassHash(password: string): string {
 }
 
 function calculateProof(passHash: string, nonce: string, role: string, deviceSid: string): string {
-  return createHash("sha256")
-    .update(passHash)
-    .update(`${nonce}|${role}|${deviceSid}`)
-    .digest("base64url");
+  // 旧版实测：proof = HMAC-SHA256(key=passHash, msg=`${nonce}|${role}|${sid}`) base64url。
+  // 之前误用 createHash(passHash 作数据) 导致 relay 拒绝 auth_response。
+  return createHmac("sha256", passHash).update(`${nonce}|${role}|${deviceSid}`).digest("base64url");
 }
 
 // ── deviceMid / deviceName ──
