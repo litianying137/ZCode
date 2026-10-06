@@ -33,6 +33,7 @@ import {
   LogOut,
   Maximize,
   Palette,
+  QrCode,
   Settings,
   User,
   ZoomIn,
@@ -45,6 +46,7 @@ import { useZCodeStore } from "@/store/StoreProvider.js";
 import { normalizeInterfaceMode } from "@/lib/interfaceMode.js";
 import type { Theme } from "@/useTheme.js";
 import { WorkspaceWebRemoteControlTrigger } from "@/WorkspaceWebRemoteControlTrigger.js";
+import { WebRemoteControlQrDialog } from "@/WebRemoteControlQrDialog.js";
 import {
   WorkspaceSidebarFooterPlanBadge,
   WorkspaceSidebarFooterUsageSummaryContent,
@@ -176,6 +178,7 @@ export const WorkspaceSidebarFooter = memo(function WorkspaceSidebarFooterCompon
       : intl.formatMessage({ id: "settings.title" });
   const usageButtonClick = onUsageClick ?? onSettingsButtonClick;
   const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+  const [qrRemoteOpen, setQrRemoteOpen] = useState(false);
   const [desktopZoomLevel, setDesktopZoomLevel] = useState(0);
   const runDesktopZoomCommand = useCallback(
     (command: (typeof DesktopCommandIds)["ZoomIn" | "ZoomOut" | "ResetZoom"]) => {
@@ -371,11 +374,24 @@ export const WorkspaceSidebarFooter = memo(function WorkspaceSidebarFooterCompon
         </DropdownMenu>
         <div className="flex shrink-0 items-center gap-1.5">
           {isDesktop && workspacePath ? (
-            <WorkspaceWebRemoteControlTrigger
-              workspacePath={workspacePath}
-              workspaceIdentity={workspaceIdentity}
-              compact
-            />
+            <>
+              <ControlHintTooltip title="手机扫码远控">
+                <Button
+                  variant="ghost"
+                  size="icon-lg"
+                  aria-label="手机扫码远控"
+                  onClick={() => setQrRemoteOpen(true)}
+                  className="text-foreground hover:bg-surface-hover hover:text-foreground"
+                >
+                  <QrCode className="size-4 text-foreground-subtle" />
+                </Button>
+              </ControlHintTooltip>
+              <WorkspaceWebRemoteControlTrigger
+                workspacePath={workspacePath}
+                workspaceIdentity={workspaceIdentity}
+                compact
+              />
+            </>
           ) : null}
           <ControlHintTooltip title={settingsButtonLabel}>
             <Button
@@ -392,6 +408,7 @@ export const WorkspaceSidebarFooter = memo(function WorkspaceSidebarFooterCompon
           </ControlHintTooltip>
         </div>
       </div>
+      <WebRemoteControlQrDialog open={qrRemoteOpen} onOpenChange={setQrRemoteOpen} />
     </footer>
   );
 });

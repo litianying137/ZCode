@@ -922,3 +922,15 @@ window.addEventListener("message", (event) => {
   const parsed = databaseStartupControlSchema.safeParse(event.data.control);
   if (parsed.success) ipcRenderer.send(InternalChannels.DatabaseStartupControl, parsed.data);
 });
+
+// Web 远程控制（直接 Web 远控，非 Bot 渠道）
+contextBridge.exposeInMainWorld("webRemoteControl", {
+  start: (): Promise<unknown> => ipcRenderer.invoke("web-remote-control:start"),
+  stop: (): Promise<void> => ipcRenderer.invoke("web-remote-control:stop"),
+  getState: (): Promise<unknown> => ipcRenderer.invoke("web-remote-control:get-state"),
+  onState: (callback: (status: unknown) => void): (() => void) => {
+    const listener = (_event: unknown, status: unknown) => callback(status);
+    ipcRenderer.on("web-remote-control:state", listener as never);
+    return () => ipcRenderer.off("web-remote-control:state", listener as never);
+  },
+});
