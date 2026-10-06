@@ -11,7 +11,7 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { app, BrowserWindow } from "electron";
 import { WebSocket } from "ws";
 import { DEFAULT_ZCODE_ENDPOINT_ORIGIN, ZCODE_VERSION } from "@zcode/shared";
@@ -108,6 +108,51 @@ function buildQrUrl(params: {
   return url.toString();
 }
 
+// ── 会话持久化 ──
+// 桌面每次重启随机换 sid+passHash 时，手机端残留页面（旧 sid）重连 relay 会判定
+// 会话冲突并 KICKED 桌面，新二维码也随之作废——"扫一次码就永久失联"的根因。
+// 旧版 persisted 模式：注册成功后把 {deviceSid, passHash} 存盘，重启/重连复用
+// 同一身份，旧二维码与已配对手机跨重启存活。AUTH_FAILED 时清除并回退注册。
+
+interface PersistedRelayAuth {
+  deviceSid: string;
+  passHash: string;
+}
+
+function relayAuthStoragePath(): string {
+  return join(homedir(), ".zcode", "v2", "web-remote-control-auth.json");
+}
+
+function loadPersistedRelayAuth(): PersistedRelayAuth | null {
+  const file = relayAuthStoragePath();
+  if (!existsSync(file)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf-8")) as Partial<PersistedRelayAuth>;
+    if (typeof parsed.deviceSid === "string" && parsed.deviceSid.trim() && typeof parsed.passHash === "string" && parsed.passHash.trim()) {
+      return { deviceSid: parsed.deviceSid.trim(), passHash: parsed.passHash.trim() };
+    }
+  } catch {
+    // ignore malformed
+  }
+  return null;
+}
+
+function savePersistedRelayAuth(auth: PersistedRelayAuth): void {
+  try {
+    writeFileSync(relayAuthStoragePath(), JSON.stringify(auth, null, 2), "utf-8");
+  } catch {
+    // best effort；写不进只是回到每次换码的旧行为
+  }
+}
+
+function clearPersistedRelayAuth(): void {
+  try {
+    unlinkSync(relayAuthStoragePath());
+  } catch {
+    // ignore missing
+  }
+}
+
 // ── relay 客户端状态 ──
 
 export type RelayState =
@@ -142,6 +187,10 @@ class RelayClient {
   private state: RelayState = "idle";
   private deviceSid: string | null = null;
   private passHash: string;
+  // persisted 模式：复用磁盘上的 sid+passHash，跨重启保持同一设备身份。
+  private authMode: "register" | "persisted";
+  // persisted 身份被 relay 拒绝（AUTH_FAILED）时清存储回退注册模式，只重试一次防循环。
+  private invalidPersistedRetryUsed = false;
   private qrUrl: string | null = null;
   private error: string | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
@@ -153,7 +202,26 @@ class RelayClient {
   private disposed = false;
 
   constructor(private options: RelayClientOptions) {
-    this.passHash = createPassHash(createPassword());
+    const persisted = loadPersistedRelayAuth();
+    if (persisted) {
+      this.authMode = "persisted";
+      this.passHash = persisted.passHash;
+      this.deviceSid = persisted.deviceSid;
+      // persisted 恢复不走 device_register_ack，二维码在构造时直接按存储身份构建；
+      // 同一 sid+hash 意味着重启后旧二维码依然有效。
+      this.qrUrl = buildQrUrl({
+        baseUrl: resolveMobileUrl(options.endpointOrigin),
+        deviceSid: persisted.deviceSid,
+        passHash: persisted.passHash,
+        deviceMid: options.deviceMid,
+        deviceName: options.deviceName,
+        appVersion: options.appVersion,
+      });
+      safeLog(`[web-remote-control] using persisted device identity sid=${persisted.deviceSid}`);
+    } else {
+      this.authMode = "register";
+      this.passHash = createPassHash(createPassword());
+    }
   }
 
   start(): void {
@@ -231,6 +299,11 @@ class RelayClient {
 
     ws.on("open", () => {
       if (this.disposed || ws !== this.ws) return;
+      if (this.authMode === "persisted" && this.deviceSid) {
+        safeLog(`[web-remote-control] ws connected, resuming persisted session sid=${this.deviceSid}`);
+        this.sendAuthInit(this.deviceSid);
+        return;
+      }
       safeLog("[web-remote-control] ws connected, registering device");
       this.setState("registering");
       this.send({
@@ -298,12 +371,32 @@ class RelayClient {
     }
   }
 
+  // 旧版 sendAuthInit：auth_init(role=device) 后走 challenge→proof→ack。
+  private sendAuthInit(deviceSid: string): void {
+    this.deviceSid = deviceSid;
+    this.setState("authenticating");
+    this.send({
+      type: "auth_init",
+      role: "device",
+      device_sid: deviceSid,
+      meta: {
+        platform: process.platform,
+        version: this.options.appVersion,
+        name: this.options.deviceName,
+      },
+      client_ts: Date.now(),
+    });
+  }
+
   private handleMessage(msg: Record<string, unknown>): void {
     const type = msg.type as string;
     switch (type) {
       case "device_register_ack": {
         this.deviceSid = (msg.device_sid as string) ?? null;
         if (this.deviceSid) {
+          // persisted：注册成功即落盘，重启后复用同一身份（旧版 onRegisteredAuth）。
+          savePersistedRelayAuth({ deviceSid: this.deviceSid, passHash: this.passHash });
+          this.authMode = "persisted";
           // 构建 QR URL
           this.qrUrl = buildQrUrl({
             baseUrl: resolveMobileUrl(this.options.endpointOrigin),
@@ -384,11 +477,41 @@ class RelayClient {
         break;
       }
       case "error": {
-        this.error = (msg.message as string) ?? (msg.code as string) ?? "relay error";
+        const code = (msg.code as string) ?? "";
+        if (code === "KICKED") {
+          // 旧版语义：会话冲突被踢。persisted 身份保留（清掉会让已配对手机永久失联），
+          // 直接断开重连，重连后用同一 sid 恢复。
+          safeLog("[web-remote-control] kicked by relay (session conflict), reconnecting with same identity");
+          this.ws?.close();
+          return;
+        }
+        if (code === "AUTH_FAILED" && this.authMode === "persisted" && !this.invalidPersistedRetryUsed) {
+          // persisted 身份已失效（relay 侧会话被清理）。清存储回退注册模式，换新身份。
+          this.invalidPersistedRetryUsed = true;
+          clearPersistedRelayAuth();
+          this.authMode = "register";
+          this.passHash = createPassHash(createPassword());
+          this.deviceSid = null;
+          this.qrUrl = null;
+          safeLog("[web-remote-control] persisted auth rejected, falling back to fresh register");
+          this.ws?.close();
+          this.scheduleReconnectNow();
+          return;
+        }
+        this.error = (msg.message as string) ?? code ?? "relay error";
         this.setState("error");
         break;
       }
     }
+  }
+
+  // AUTH_FAILED 回退需要立刻重连（close 事件里也会 schedule，这里 0 延迟抢跑一次）。
+  private scheduleReconnectNow(): void {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, 0);
   }
 
   /** 向 relay 发送任意 data 帧（设备→手机）。 */
@@ -489,7 +612,8 @@ function routeControlPayload(payload: Record<string, unknown>): void {
           requestId: payload.requestId as string,
           bridgeSessionId: payload.bridgeSessionId as string,
           ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
-          reason: "not-implemented",
+          // reason 必须在 SPA sg 枚举内，否则整条 payload 校验失败被静默丢弃
+          reason: "unsupported-action",
           error: err.message,
         });
       });
@@ -554,23 +678,30 @@ function sendToRelay(payload: Record<string, unknown>): void {
 }
 
 function buildBootstrapResult(): Record<string, unknown> {
+  // SPA 端 zod schema（dg）：initialViewState/mobileViewState 是 .optional()，
+  // 只允许缺省（undefined），传 null 会让整个 payload safeParse 失败被静默丢弃
+  // ——即"已配对但桌面响应超时"的根因。workspaces 条目必填 label（ag schema）。
   return {
     windowControlSessionId: client?.getStatus().deviceSid ?? "unknown",
     desktopAppVersion: ZCODE_VERSION,
     workspaces: getWorkspaces(),
     tasks: [],
-    initialViewState: null,
-    mobileViewState: null,
   };
 }
 
 function buildWorkspaceList(): Record<string, unknown> {
+  const workspaces = getWorkspaces();
   return {
-    workspaces: getWorkspaces(),
+    workspaces,
     tasks: [],
-    activeWorkspaceKey: getWorkspaces()[0]?.workspacePath ?? null,
-    activeTaskId: null,
+    activeWorkspaceKey: workspaces[0]?.workspacePath,
   };
+}
+
+// 旧版 ul()：路径最后一段作为展示 label。
+function workspaceLabel(path: string): string {
+  const segments = path.replace(/\\/g, "/").split("/").filter(Boolean);
+  return segments[segments.length - 1] ?? path;
 }
 
 function getWorkspaces(): Record<string, unknown>[] {
@@ -578,12 +709,14 @@ function getWorkspaces(): Record<string, unknown>[] {
   if (windows.length === 0) {
     return [];
   }
-  // 从所有窗口收集工作区。简单实现：返回一个本地工作区条目。
+  // TODO(下一阶段): 从主窗口解析真实工作区路径并聚合 remote 会话；
+  // 当前返回单一本地工作区 stub，字段按 SPA ag schema 补齐（label 必填）。
+  const workspacePath = "default";
   return [
     {
       kind: "local",
-      workspacePath: "default",
-      workspaceIdentity: undefined,
+      workspacePath,
+      label: workspaceLabel(workspacePath),
       connectionState: "connected",
     },
   ];
@@ -593,14 +726,17 @@ async function handleWorkspaceBridgeOpen(payload: Record<string, unknown>): Prom
   const bridgeSessionId = payload.bridgeSessionId as string;
   const workspaceKey = payload.workspaceKey as string;
   // 简版：回复 bridge-ready 但不建立实际 host bridge（让手机 SPA 进入 UI 界面但不推送数据）
+  // bridge 载荷按 SPA cg schema：kind/workspaceKey/workspacePath 必填，initialTaskId 可选。
   sendToRelay({
     zcode_type: "workspace-bridge-ready",
     requestId: payload.requestId as string,
     bridgeSessionId,
     ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
+    ...(payload.recoveryId !== undefined ? { recoveryId: payload.recoveryId as string } : {}),
     bridge: {
       bridgeSessionId,
-      bridgeGeneration: (payload.bridgeGeneration as number) ?? 0,
+      ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
+      ...(payload.recoveryId !== undefined ? { recoveryId: payload.recoveryId as string } : {}),
       workspaceKey,
       workspacePath: workspaceKey,
       kind: "local",

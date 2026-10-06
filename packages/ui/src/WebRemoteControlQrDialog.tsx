@@ -78,9 +78,9 @@ export function WebRemoteControlQrDialog({
     };
   }, [open]);
 
-  // 关闭时停止 relay
+  // 关闭弹窗：relay 连接常驻（app 启动即自动连接），弹窗只是二维码展示窗口。
+  // 之前关闭即 stop 会让扫码后的已配对手机瞬间失联。
   const handleClose = useCallback(() => {
-    void window.webRemoteControl?.stop();
     onOpenChange(false);
   }, [onOpenChange]);
 
