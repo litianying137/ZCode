@@ -115,6 +115,7 @@ export type RelayState =
   | "connecting"
   | "registering"
   | "authenticating"
+  | "waiting_terminal"
   | "paired"
   | "error";
 
@@ -145,6 +146,10 @@ class RelayClient {
   private error: string | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private connectTimeout: NodeJS.Timeout | null = null;
+  // 旧版心跳：paired / waiting_terminal 每 ~10s 发 pair_status_query，relay 回
+  // pair_status_ack；超过 watchdog 窗口没收到 ack 视为连接僵死，重连。
+  private heartbeatTimer: NodeJS.Timeout | null = null;
+  private lastPairStatusAckAt = 0;
   private disposed = false;
 
   constructor(private options: RelayClientOptions) {
@@ -178,6 +183,28 @@ class RelayClient {
       clearTimeout(this.connectTimeout);
       this.connectTimeout = null;
     }
+    if (this.heartbeatTimer) {
+      clearTimeout(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+  }
+
+  // 旧版 scheduleHeartbeat：paired / waiting_terminal 状态下周期发 pair_status_query。
+  // 无 ack 超过 30s（3 个周期）判定僵死，主动断开走重连。
+  private scheduleHeartbeat(): void {
+    if (this.heartbeatTimer || this.disposed) return;
+    this.heartbeatTimer = setTimeout(() => {
+      this.heartbeatTimer = null;
+      if (this.disposed || !this.deviceSid) return;
+      if (this.state !== "paired" && this.state !== "waiting_terminal") return;
+      if (this.lastPairStatusAckAt && Date.now() - this.lastPairStatusAckAt > 30_000) {
+        safeLog("[web-remote-control] heartbeat watchdog fired, reconnecting");
+        this.ws?.close();
+        return;
+      }
+      this.send({ type: "pair_status_query", device_sid: this.deviceSid, client_ts: Date.now() });
+      this.scheduleHeartbeat();
+    }, 10_000);
   }
 
   private connect(): void {
@@ -320,14 +347,26 @@ class RelayClient {
       }
       case "auth_ack":
       case "pair_status_ack": {
+        // auth_ack 的 pair_status 可能是 waiting（设备已认证、等手机扫码）
+        // 或 paired（手机已配对）。旧版语义：waiting → waiting_terminal。
         const pairStatus = (msg.pair_status as string) ?? "";
-        if (pairStatus === "paired" || type === "auth_ack") {
+        if (pairStatus === "paired") {
           this.setState("paired");
+        } else if (type === "auth_ack" || pairStatus === "waiting") {
+          this.setState("waiting_terminal");
         }
+        this.lastPairStatusAckAt = Date.now();
+        this.scheduleHeartbeat();
         break;
       }
       case "data": {
-        // 数据转发（手机→桌面的操作指令）——最小实现暂不处理
+        // 手机→桌面的 RPC 帧。当前记录帧摘要用于逆向 RPC 层（下一阶段接 workspace bridge）。
+        const payload = msg.payload;
+        const summary =
+          typeof payload === "string"
+            ? payload.slice(0, 200)
+            : JSON.stringify(payload)?.slice(0, 200);
+        safeLog(`[web-remote-control] data frame: ${summary ?? "(empty)"}`);
         break;
       }
       case "error": {

@@ -34,6 +34,7 @@ const STATE_LABELS: Record<string, string> = {
   connecting: "连接中…",
   registering: "注册中…",
   authenticating: "认证中…",
+  waiting_terminal: "已连接，等待手机扫码",
   paired: "已配对",
   error: "错误",
 };
@@ -101,7 +102,9 @@ export function WebRemoteControlQrDialog({
   }, [status.qrUrl]);
 
   const stateLabel = STATE_LABELS[status.state] ?? status.state;
-  const isWorking = ["connecting", "registering", "authenticating"].includes(status.state);
+  const isWorking = ["connecting", "registering", "authenticating", "waiting_terminal"].includes(
+    status.state,
+  );
   const isPaired = status.state === "paired";
   const isError = status.state === "error";
 
@@ -113,7 +116,9 @@ export function WebRemoteControlQrDialog({
             <Smartphone className="size-4" />
             手机远控
           </DialogTitle>
-          <DialogDescription>扫码或复制链接，在手机浏览器打开即可控制当前工作区。</DialogDescription>
+          <DialogDescription>
+            扫码或复制链接，在手机浏览器打开即可控制当前工作区。
+          </DialogDescription>
         </DialogHeader>
 
         <div className="flex flex-col items-center gap-4 py-2">
