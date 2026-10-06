@@ -438,7 +438,11 @@ let workspaceListPushTimer: NodeJS.Timeout | null = null;
 function scheduleWorkspaceListPush(): void {
   if (workspaceListPushTimer) return;
   workspaceListPushTimer = setInterval(() => {
-    if (!client) return;
+    if (!client) {
+      clearInterval(workspaceListPushTimer!);
+      workspaceListPushTimer = null;
+      return;
+    }
     const status = client.getStatus();
     if (status.state !== "paired") return;
     safeLog("[web-remote-control] push workspace list updated");
@@ -474,8 +478,10 @@ function routeControlPayload(payload: Record<string, unknown>): void {
     }
     case "workspace-bridge-open": {
       safeLog(`[web-remote-control] workspace-bridge-open received: workspaceKey=${payload.workspaceKey as string} bridgeSessionId=${payload.bridgeSessionId as string}`);
-      // 手机请求打开某个工作区的 bridge。旧版会从 host 拿一个 MessagePort 创建双向协议桥。
-      // 当前先回复 workspace-bridge-error，让手机显示"桥接失败"但不崩溃。待下一阶段实现。
+      // 手机请求打开某个工作区的 bridge。旧版经 host MessagePort 建双向 RPC 桥
+      // （rpc-frame ⇄ AcknowledgedRelayProtocol ⇄ host ServiceCollection）。
+      // 当前简化实现：直接回复 workspace-bridge-ready（stub bridge，无 rpc-frame 通道），
+      // 手机 SPA 可进入工作区界面，但无实时数据推送。
       handleWorkspaceBridgeOpen(payload).catch((err) => {
         safeLog(`[web-remote-control] workspace-bridge-open failed: ${err.message}`);
         sendToRelay({
