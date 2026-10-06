@@ -200,12 +200,13 @@ import {
 } from "./resourceManagerWindow.js";
 import { createDesktopHelpConfigReader } from "./desktopHelpConfig.js";
 import { registerPlatformIpcHandlers } from "./desktopMainIpcPlatform.js";
-import { registerWebRemoteControlIpc, startWebRemoteControl } from "./webRemoteControl.js";
 import {
-  loadCliMcpFromUserDirectory,
-  migrateLegacyCommonMcp,
-  saveCliMcpToUserDirectory,
-} from "./mcpUserDirectory/index.js";
+  registerWebRemoteControlIpc,
+  setWebRemoteControlHostProcessResolver,
+  setWebRemoteControlWorkspaceResolver,
+  startWebRemoteControl,
+} from "./webRemoteControl.js";
+import { loadCliMcpFromUserDirectory, migrateLegacyCommonMcp } from "./mcpUserDirectory/index.js";
 import { registerRemoteIpcHandlers } from "./desktopMainIpcRemote.js";
 import {
   configureDesktopStabilityTelemetry,
@@ -2067,6 +2068,13 @@ app.whenReady().then(async () => {
   });
 
   registerWebRemoteControlIpc();
+  setWebRemoteControlHostProcessResolver(() => {
+    const first = windowHostProcessMap.values().next();
+    return first.done ? undefined : first.value;
+  });
+  setWebRemoteControlWorkspaceResolver(() =>
+    [...windowWorkspaceMap.values()].flatMap((paths) => [...paths]),
+  );
   // 启动即连 relay：手机远控保持在线（与旧版一致），弹窗打开时直接展示状态；
   // 同时保证终端日志里始终有 [web-remote-control] 诊断序列，无需手动触发。
   startWebRemoteControl();

@@ -1,3 +1,4 @@
+/* eslint-disable max-lines */
 /**
  * Web 远程控制 relay 客户端——从旧版 ZCode.app 逆向移植。
  *
@@ -8,15 +9,27 @@
  * relay WS 地址：endpoint origin 为 zcode.z.ai 时用 wss://zcode.z.ai/ws
  * mobile URL base：${endpointOrigin}/remote/v4
  */
-import { createHash, createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { app, BrowserWindow } from "electron";
+import {
+  BrowserWindow,
+  MessageChannelMain,
+  type MessagePortMain,
+  type UtilityProcess,
+} from "electron";
+import { HostMessageTypes } from "@zcode/shared";
 import { WebSocket } from "ws";
 import { DEFAULT_ZCODE_ENDPOINT_ORIGIN, ZCODE_VERSION } from "@zcode/shared";
-// crc32/base64 实现在 @zcode/shared 的 wire-binary.ts（未顶层 reexport），
-// 这里内联其导出函数，保持与旧端/SPA 端一致的校验算法。
+import { WebRemoteControlRpcTransport } from "./webRemoteControlRpcTransport.js";
+import {
+  getTasks,
+  getWorkspaces,
+  setWebRemoteControlWorkspaceResolver,
+} from "./webRemoteControlTaskIndex.js";
+
+export { setWebRemoteControlWorkspaceResolver };
 
 // stdout 管道断开（终端关闭/Ctrl+C 后进程仍在）时 console.log 会抛 EIO 导致
 // uncaught exception 弹窗；所有诊断日志必须走安全输出。
@@ -82,9 +95,15 @@ function resolveDeviceName(): string {
 const RELAY_WS_DEFAULT = "wss://zcode.z.ai/ws";
 const MOBILE_URL_DEFAULT = "https://zcode.z.ai/remote/v4";
 
-function resolveRelayWsUrl(_endpointOrigin: string): string {
+function resolveRelayWsUrl(_endpointOrigin: string, deviceMid?: string): string {
   const override = process.env.ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL?.trim();
-  return override || RELAY_WS_DEFAULT;
+  const base = override || RELAY_WS_DEFAULT;
+  // 手机 SPA 与旧桌面 transport 都把 mid 放在 relay WS query；relay 用 query/header
+  // 双重 device identity 将 terminal URL 的 mid 与 device socket 配对。
+  if (!deviceMid) return base;
+  const url = new URL(base);
+  url.searchParams.set("mid", deviceMid);
+  return url.toString();
 }
 
 function resolveMobileUrl(_endpointOrigin: string): string {
@@ -130,7 +149,12 @@ function loadPersistedRelayAuth(): PersistedRelayAuth | null {
   if (!existsSync(file)) return null;
   try {
     const parsed = JSON.parse(readFileSync(file, "utf-8")) as Partial<PersistedRelayAuth>;
-    if (typeof parsed.deviceSid === "string" && parsed.deviceSid.trim() && typeof parsed.passHash === "string" && parsed.passHash.trim()) {
+    if (
+      typeof parsed.deviceSid === "string" &&
+      parsed.deviceSid.trim() &&
+      typeof parsed.passHash === "string" &&
+      parsed.passHash.trim()
+    ) {
       return { deviceSid: parsed.deviceSid.trim(), passHash: parsed.passHash.trim() };
     }
   } catch {
@@ -282,7 +306,12 @@ class RelayClient {
     this.setState("connecting");
     safeLog(`[web-remote-control] connecting to ${this.options.relayWsUrl}`);
 
-    const ws = new WebSocket(this.options.relayWsUrl);
+    // 旧版 external relay device 必须带 X-Device-ID；relay 用这个 header 将 device
+    // socket 与 terminal URL 的 mid 配对。缺失时两边都能 auth，但 pair_status 永远 waiting，
+    // 约 180s 后 device 被 KICKED——正是 WiFi/4G 均无法撮合的根因。
+    const ws = new WebSocket(this.options.relayWsUrl, {
+      headers: { "X-Device-ID": this.options.deviceMid },
+    });
     this.ws = ws;
 
     // 10 秒连接超时
@@ -302,7 +331,9 @@ class RelayClient {
     ws.on("open", () => {
       if (this.disposed || ws !== this.ws) return;
       if (this.authMode === "persisted" && this.deviceSid) {
-        safeLog(`[web-remote-control] ws connected, resuming persisted session sid=${this.deviceSid}`);
+        safeLog(
+          `[web-remote-control] ws connected, resuming persisted session sid=${this.deviceSid}`,
+        );
         this.sendAuthInit(this.deviceSid);
         return;
       }
@@ -461,11 +492,24 @@ class RelayClient {
       case "data": {
         // 手机→桌面的 RPC 帧。当前记录帧摘要用于逆向 RPC 层（下一阶段接 workspace bridge）。
         const payload = msg.payload;
-        const summary =
-          typeof payload === "string"
-            ? payload.slice(0, 200)
-            : JSON.stringify(payload)?.slice(0, 200);
-        safeLog(`[web-remote-control] data frame: ${summary ?? "(empty)"}`);
+        if (typeof payload !== "object" || payload === null) {
+          safeLog(
+            `[web-remote-control] data frame: non-object payload=${String(payload).slice(0, 200)}`,
+          );
+          break;
+        }
+        const p = payload as Record<string, unknown>;
+        const ztype = p.zcode_type as string | undefined;
+        safeLog(
+          `[web-remote-control] data frame: zcode_type=${ztype} seq=${p.seq ?? ""} requestId=${p.requestId ?? ""} bridgeSessionId=${p.bridgeSessionId ?? ""}`,
+        );
+        try {
+          routeControlPayload(p);
+        } catch (err) {
+          safeLog(
+            `[web-remote-control] route payload error: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
         break;
       }
       case "error": {
@@ -473,11 +517,17 @@ class RelayClient {
         if (code === "KICKED") {
           // 旧版语义：会话冲突被踢。persisted 身份保留（清掉会让已配对手机永久失联），
           // 直接断开重连，重连后用同一 sid 恢复。
-          safeLog("[web-remote-control] kicked by relay (session conflict), reconnecting with same identity");
+          safeLog(
+            "[web-remote-control] kicked by relay (session conflict), reconnecting with same identity",
+          );
           this.ws?.close();
           return;
         }
-        if (code === "AUTH_FAILED" && this.authMode === "persisted" && !this.invalidPersistedRetryUsed) {
+        if (
+          code === "AUTH_FAILED" &&
+          this.authMode === "persisted" &&
+          !this.invalidPersistedRetryUsed
+        ) {
           // persisted 身份已失效（relay 侧会话被清理）。清存储回退注册模式，换新身份。
           this.invalidPersistedRetryUsed = true;
           clearPersistedRelayAuth();
@@ -538,6 +588,34 @@ class RelayClient {
   }
 }
 
+// ── host RPC bridge ──
+
+let resolveLocalHostProcess: (() => UtilityProcess | undefined) | null = null;
+let activeBridge: {
+  bridgeSessionId: string;
+  bridgeGeneration: number;
+  port: MessagePortMain;
+  transport: WebRemoteControlRpcTransport;
+} | null = null;
+
+/** index.ts 注入当前 local host process，避免本模块反向依赖 main 的局部 process map。 */
+export function setWebRemoteControlHostProcessResolver(
+  resolver: () => UtilityProcess | undefined,
+): void {
+  resolveLocalHostProcess = resolver;
+}
+
+function disposeActiveBridge(): void {
+  if (!activeBridge) return;
+  activeBridge.transport.dispose();
+  try {
+    activeBridge.port.close();
+  } catch {
+    // best effort
+  }
+  activeBridge = null;
+}
+
 // ── 管理器（单例）──
 
 let client: RelayClient | null = null;
@@ -588,7 +666,9 @@ function routeControlPayload(payload: Record<string, unknown>): void {
       break;
     }
     case "workspace-bridge-open": {
-      safeLog(`[web-remote-control] workspace-bridge-open received: workspaceKey=${payload.workspaceKey as string} bridgeSessionId=${payload.bridgeSessionId as string}`);
+      safeLog(
+        `[web-remote-control] workspace-bridge-open received: workspaceKey=${payload.workspaceKey as string} bridgeSessionId=${payload.bridgeSessionId as string}`,
+      );
       // 手机请求打开某个工作区的 bridge。旧版经 host MessagePort 建双向 RPC 桥
       // （rpc-frame ⇄ AcknowledgedRelayProtocol ⇄ host ServiceCollection）。
       // 当前简化实现：直接回复 workspace-bridge-ready（stub bridge，无 rpc-frame 通道），
@@ -599,7 +679,9 @@ function routeControlPayload(payload: Record<string, unknown>): void {
           zcode_type: "workspace-bridge-error",
           requestId: payload.requestId as string,
           bridgeSessionId: payload.bridgeSessionId as string,
-          ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
+          ...(payload.bridgeGeneration !== undefined
+            ? { bridgeGeneration: payload.bridgeGeneration as number }
+            : {}),
           // reason 必须在 SPA sg 枚举内，否则整条 payload 校验失败被静默丢弃
           reason: "unsupported-action",
           error: err.message,
@@ -620,9 +702,14 @@ function routeControlPayload(payload: Record<string, unknown>): void {
     case "platform-request": {
       const requestId = payload.requestId as string;
       const method = payload.method as string;
-      safeLog(`[web-remote-control] platform request: method=${method} args=${JSON.stringify(payload.args as unknown).slice(0, 500)}`);
+      safeLog(
+        `[web-remote-control] platform request: method=${method} args=${JSON.stringify(payload.args as unknown).slice(0, 500)}`,
+      );
       try {
-        const result = handlePlatformRequest(method, payload.args as Record<string, unknown> | undefined);
+        const result = handlePlatformRequest(
+          method,
+          payload.args as Record<string, unknown> | undefined,
+        );
         sendToRelay({
           zcode_type: "platform-response",
           requestId,
@@ -642,15 +729,26 @@ function routeControlPayload(payload: Record<string, unknown>): void {
       break;
     }
     case "mobile-view-state-update": {
-      safeLog(`[web-remote-control] mobile view state update: ${JSON.stringify(payload.viewState as Record<string, unknown>).slice(0, 200)}`);
+      safeLog(
+        `[web-remote-control] mobile view state update: ${JSON.stringify(payload.viewState as Record<string, unknown>).slice(0, 200)}`,
+      );
       break;
     }
     case "telemetry-report": {
       // 静默忽略
       break;
     }
+    case "rpc-frame":
+    case "rpc-frame-ack": {
+      if (!activeBridge?.transport.acceptPayload(payload)) {
+        safeLog(`[web-remote-control] rpc payload rejected type=${ztype}`);
+      }
+      break;
+    }
     case "mobile-diagnostic": {
-      safeLog(`[web-remote-control] mobile diagnostic: ${JSON.stringify(payload as Record<string, unknown>).slice(0, 300)}`);
+      safeLog(
+        `[web-remote-control] mobile diagnostic: ${JSON.stringify(payload as Record<string, unknown>).slice(0, 300)}`,
+      );
       break;
     }
     default:
@@ -669,11 +767,13 @@ function buildBootstrapResult(): Record<string, unknown> {
   // SPA 端 zod schema（dg）：initialViewState/mobileViewState 是 .optional()，
   // 只允许缺省（undefined），传 null 会让整个 payload safeParse 失败被静默丢弃
   // ——即"已配对但桌面响应超时"的根因。workspaces 条目必填 label（ag schema）。
+  // tasks 直接读 tasks-index.sqlite（与 host 共库，WAL 并发只读），
+  // 首页每个工作区的任务计数即来自这里，而非 bridge 后的 RPC 通道。
   return {
     windowControlSessionId: client?.getStatus().deviceSid ?? "unknown",
     desktopAppVersion: ZCODE_VERSION,
     workspaces: getWorkspaces(),
-    tasks: [],
+    tasks: getTasks(),
   };
 }
 
@@ -681,118 +781,84 @@ function buildWorkspaceList(): Record<string, unknown> {
   const workspaces = getWorkspaces();
   return {
     workspaces,
-    tasks: [],
+    tasks: getTasks(),
     activeWorkspaceKey: workspaces[0]?.workspacePath,
   };
 }
-
-// 旧版 ul()：路径最后一段作为展示 label。
-function workspaceLabel(path: string): string {
-  const segments = path.replace(/\\/g, "/").split("/").filter(Boolean);
-  return segments[segments.length - 1] ?? path;
-}
-
-function getWorkspaces(): Record<string, unknown>[] {
-  const windows = BrowserWindow.getAllWindows();
-  if (windows.length === 0) {
-    return [];
-  }
-  // TODO(下一阶段): 从主窗口解析真实工作区路径并聚合 remote 会话；
-  // 当前返回单一本地工作区 stub，字段按 SPA ag schema 补齐（label 必填）。
-  const workspacePath = "default";
-  return [
-    {
-      kind: "local",
-      workspacePath,
-      label: workspaceLabel(workspacePath),
-      connectionState: "connected",
-    },
-  ];
-}
-
-// 内联实现 @zcode/shared 的 crc32WireBytes / encodeWireBytesBase64（wire-binary.ts），
-// 保持与旧版 relay / 手机 SPA 一致的校验算法。
-const WIRE_BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-function wireCrc32(bytes: Uint8Array): string {
-  let crc = 0xffffffff;
-  for (const byte of bytes) {
-    crc ^= byte;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-    }
-  }
-  return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, "0");
-}
-function wireBase64Encode(bytes: Uint8Array): string {
-  let result = "";
-  for (let offset = 0; offset < bytes.byteLength; offset += 3) {
-    const a = bytes[offset] ?? 0;
-    const hasB = offset + 1 < bytes.byteLength;
-    const b = hasB ? (bytes[offset + 1] ?? 0) : 0;
-    const hasC = offset + 2 < bytes.byteLength;
-    const c = hasC ? (bytes[offset + 2] ?? 0) : 0;
-    const triple = (a << 16) | (b << 8) | c;
-    result += WIRE_BASE64_ALPHABET[(triple >> 18) & 0x3f];
-    result += WIRE_BASE64_ALPHABET[(triple >> 12) & 0x3f];
-    result += hasB ? WIRE_BASE64_ALPHABET[(triple >> 6) & 0x3f] : "=";
-    result += hasC ? WIRE_BASE64_ALPHABET[triple & 0x3f] : "=";
-  }
-  return result;
-}
-
 async function handleWorkspaceBridgeOpen(payload: Record<string, unknown>): Promise<void> {
   const bridgeSessionId = payload.bridgeSessionId as string;
   const workspaceKey = payload.workspaceKey as string;
-  // 简版：回复 bridge-ready 但不建立实际 host bridge（让手机 SPA 进入 UI 界面但不推送数据）
-  // bridge 载荷按 SPA cg schema：kind/workspaceKey/workspacePath 必填，initialTaskId 可选。
+  const host = resolveLocalHostProcess?.();
+  if (!host) throw new Error("Local host process is unavailable for Web remote control bridge");
+
+  disposeActiveBridge();
+  const { port1, port2 } = new MessageChannelMain();
+  const attachmentId = randomUUID();
+  const bridgeGeneration = (payload.bridgeGeneration as number) ?? 1;
+  const transport = new WebRemoteControlRpcTransport({
+    bridgeSessionId,
+    bridgeGeneration,
+    sendFrame: (frame) => client?.sendPayload(frame as unknown as Record<string, unknown>),
+    onMessage: (bytes) => {
+      const bridge = activeBridge;
+      if (!bridge || bridge.bridgeSessionId !== bridgeSessionId) return;
+      bridge.port.postMessage(bytes);
+      safeLog(`[web-remote-control] relay→host rpc message bytes=${bytes.byteLength}`);
+    },
+    onFault: (fault) => safeLog(`[web-remote-control] rpc transport fault=${fault.reason}`),
+  });
+  activeBridge = { bridgeSessionId, bridgeGeneration, port: port1, transport };
+
+  port1.on("message", (event: { data: unknown }) => {
+    const bridge = activeBridge;
+    if (!bridge || bridge.bridgeSessionId !== bridgeSessionId) return;
+    const raw = event.data;
+    const bytes =
+      raw instanceof Uint8Array ? raw : raw instanceof ArrayBuffer ? new Uint8Array(raw) : null;
+    if (!bytes) {
+      safeLog(`[web-remote-control] host port control payload ignored type=${typeof raw}`);
+      return;
+    }
+    bridge.transport.send(bytes);
+    safeLog(`[web-remote-control] host→relay rpc message bytes=${bytes.byteLength}`);
+  });
+  port1.start();
+  host.postMessage(
+    {
+      type: HostMessageTypes.AttachServicePort,
+      requestId: randomUUID(),
+      attachmentId,
+      clientMode: "web-remote-replayable",
+      scope: { kind: "local" },
+    },
+    [port2],
+  );
+
+  // 仅在 port 已挂到 host 后通知 SPA；host attachment 会立即接管 MessagePort。
   sendToRelay({
     zcode_type: "workspace-bridge-ready",
     requestId: payload.requestId as string,
     bridgeSessionId,
-    ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
+    ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration } : {}),
     ...(payload.recoveryId !== undefined ? { recoveryId: payload.recoveryId as string } : {}),
     bridge: {
       bridgeSessionId,
-      ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
+      ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration } : {}),
       ...(payload.recoveryId !== undefined ? { recoveryId: payload.recoveryId as string } : {}),
       workspaceKey,
       workspacePath: workspaceKey,
       kind: "local",
-      // 给 SPA 一个真实的 initialTaskId（即使无任务），避免空值触发错误视图。
-      initialTaskId: undefined,
     },
   });
-  safeLog(`[web-remote-control] workspace bridge ready (stub) session=${bridgeSessionId} workspace=${workspaceKey}`);
-
-  // SPA 在 bridge ready 后立即建 ChannelClient 并发 Initialize 帧（编码为 rpc-frame 走 data 通道）。
-  // 桌面必须在 ~10s 内回 Initialize 确认，否则 SPA 进入恢复循环。
-  // 这里同步发一个最小有效 rpc-frame：seq=1, messageSeq=1, 单分片 complete，内容为空 Initialize 响应。
-  // RPC Initialize 响应的 VSBuffer bytes = [0, 0, 0, 1, 0]（ChannelClient 识别的 Initialize 响应协议码）。
-  const msgBuf = Buffer.from([0, 0, 0, 1, 0]);
-  const crc32Val = wireCrc32(new Uint8Array(msgBuf));
-  const bridgeGen = (payload.bridgeGeneration as number) ?? 1;
-  const rpcFrame = {
-    zcode_type: "rpc-frame",
-    bridgeSessionId,
-    bridgeGeneration: bridgeGen,
-    seq: 1,
-    messageSeq: 1,
-    fragmentIndex: 0,
-    fragmentCount: 1,
-    messageBytes: msgBuf.length,
-    checksum: { algorithm: "crc32", value: crc32Val },
-    dataBase64: wireBase64Encode(new Uint8Array(msgBuf)),
-  };
-  safeLog(`[web-remote-control] rpc-frame Initialize payload: dataBase64=${rpcFrame.dataBase64} crc32=${crc32Val}`);
-  if (client) {
-    client.sendPayload(rpcFrame as unknown as Record<string, unknown>);
-    safeLog(`[web-remote-control] sent rpc-frame Initialize seq=1 msgBytes=${msgBuf.length}`);
-  } else {
-    safeLog("[web-remote-control] no client for rpc-frame Initialize");
-  }
+  safeLog(
+    `[web-remote-control] workspace bridge ready session=${bridgeSessionId} attachment=${attachmentId}`,
+  );
 }
 
-function handlePlatformRequest(method: string, args: Record<string, unknown> | undefined): unknown {
+function handlePlatformRequest(
+  method: string,
+  _args: Record<string, unknown> | undefined,
+): unknown {
   switch (method) {
     case "focus":
       // 手机要求桌面窗口前置
@@ -817,7 +883,7 @@ export function startWebRemoteControl(): RelayStatus {
   const deviceName = resolveDeviceName();
 
   client = new RelayClient({
-    relayWsUrl: resolveRelayWsUrl(endpointOrigin),
+    relayWsUrl: resolveRelayWsUrl(endpointOrigin, deviceMid),
     deviceMid,
     deviceName,
     appVersion: ZCODE_VERSION,
