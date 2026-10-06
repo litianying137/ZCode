@@ -200,7 +200,7 @@ import {
 } from "./resourceManagerWindow.js";
 import { createDesktopHelpConfigReader } from "./desktopHelpConfig.js";
 import { registerPlatformIpcHandlers } from "./desktopMainIpcPlatform.js";
-import { registerWebRemoteControlIpc } from "./webRemoteControl.js";
+import { registerWebRemoteControlIpc, startWebRemoteControl } from "./webRemoteControl.js";
 import {
   loadCliMcpFromUserDirectory,
   migrateLegacyCommonMcp,
@@ -2067,6 +2067,9 @@ app.whenReady().then(async () => {
   });
 
   registerWebRemoteControlIpc();
+  // 启动即连 relay：手机远控保持在线（与旧版一致），弹窗打开时直接展示状态；
+  // 同时保证终端日志里始终有 [web-remote-control] 诊断序列，无需手动触发。
+  startWebRemoteControl();
 
   registerPlatformIpcHandlers({
     fetchHelpConfig: readHelpConfig,
