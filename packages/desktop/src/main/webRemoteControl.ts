@@ -15,6 +15,8 @@ import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { app, BrowserWindow } from "electron";
 import { WebSocket } from "ws";
 import { DEFAULT_ZCODE_ENDPOINT_ORIGIN, ZCODE_VERSION } from "@zcode/shared";
+// crc32/base64 实现在 @zcode/shared 的 wire-binary.ts（未顶层 reexport），
+// 这里内联其导出函数，保持与旧端/SPA 端一致的校验算法。
 
 // stdout 管道断开（终端关闭/Ctrl+C 后进程仍在）时 console.log 会抛 EIO 导致
 // uncaught exception 弹窗；所有诊断日志必须走安全输出。
@@ -708,6 +710,36 @@ function getWorkspaces(): Record<string, unknown>[] {
   ];
 }
 
+// 内联实现 @zcode/shared 的 crc32WireBytes / encodeWireBytesBase64（wire-binary.ts），
+// 保持与旧版 relay / 手机 SPA 一致的校验算法。
+const WIRE_BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+function wireCrc32(bytes: Uint8Array): string {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+    }
+  }
+  return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, "0");
+}
+function wireBase64Encode(bytes: Uint8Array): string {
+  let result = "";
+  for (let offset = 0; offset < bytes.byteLength; offset += 3) {
+    const a = bytes[offset] ?? 0;
+    const hasB = offset + 1 < bytes.byteLength;
+    const b = hasB ? (bytes[offset + 1] ?? 0) : 0;
+    const hasC = offset + 2 < bytes.byteLength;
+    const c = hasC ? (bytes[offset + 2] ?? 0) : 0;
+    const triple = (a << 16) | (b << 8) | c;
+    result += WIRE_BASE64_ALPHABET[(triple >> 18) & 0x3f];
+    result += WIRE_BASE64_ALPHABET[(triple >> 12) & 0x3f];
+    result += hasB ? WIRE_BASE64_ALPHABET[(triple >> 6) & 0x3f] : "=";
+    result += hasC ? WIRE_BASE64_ALPHABET[triple & 0x3f] : "=";
+  }
+  return result;
+}
+
 async function handleWorkspaceBridgeOpen(payload: Record<string, unknown>): Promise<void> {
   const bridgeSessionId = payload.bridgeSessionId as string;
   const workspaceKey = payload.workspaceKey as string;
@@ -726,9 +758,38 @@ async function handleWorkspaceBridgeOpen(payload: Record<string, unknown>): Prom
       workspaceKey,
       workspacePath: workspaceKey,
       kind: "local",
+      // 给 SPA 一个真实的 initialTaskId（即使无任务），避免空值触发错误视图。
+      initialTaskId: undefined,
     },
   });
   safeLog(`[web-remote-control] workspace bridge ready (stub) session=${bridgeSessionId} workspace=${workspaceKey}`);
+
+  // SPA 在 bridge ready 后立即建 ChannelClient 并发 Initialize 帧（编码为 rpc-frame 走 data 通道）。
+  // 桌面必须在 ~10s 内回 Initialize 确认，否则 SPA 进入恢复循环。
+  // 这里同步发一个最小有效 rpc-frame：seq=1, messageSeq=1, 单分片 complete，内容为空 Initialize 响应。
+  // RPC Initialize 响应的 VSBuffer bytes = [0, 0, 0, 1, 0]（ChannelClient 识别的 Initialize 响应协议码）。
+  const msgBuf = Buffer.from([0, 0, 0, 1, 0]);
+  const crc32Val = wireCrc32(new Uint8Array(msgBuf));
+  const bridgeGen = (payload.bridgeGeneration as number) ?? 1;
+  const rpcFrame = {
+    zcode_type: "rpc-frame",
+    bridgeSessionId,
+    bridgeGeneration: bridgeGen,
+    seq: 1,
+    messageSeq: 1,
+    fragmentIndex: 0,
+    fragmentCount: 1,
+    messageBytes: msgBuf.length,
+    checksum: { algorithm: "crc32", value: crc32Val },
+    dataBase64: wireBase64Encode(new Uint8Array(msgBuf)),
+  };
+  safeLog(`[web-remote-control] rpc-frame Initialize payload: dataBase64=${rpcFrame.dataBase64} crc32=${crc32Val}`);
+  if (client) {
+    client.sendPayload(rpcFrame as unknown as Record<string, unknown>);
+    safeLog(`[web-remote-control] sent rpc-frame Initialize seq=1 msgBytes=${msgBuf.length}`);
+  } else {
+    safeLog("[web-remote-control] no client for rpc-frame Initialize");
+  }
 }
 
 function handlePlatformRequest(method: string, args: Record<string, unknown> | undefined): unknown {
