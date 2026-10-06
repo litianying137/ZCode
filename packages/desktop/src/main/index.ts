@@ -200,6 +200,7 @@ import {
 } from "./resourceManagerWindow.js";
 import { createDesktopHelpConfigReader } from "./desktopHelpConfig.js";
 import { registerPlatformIpcHandlers } from "./desktopMainIpcPlatform.js";
+import { registerWebRemoteControlIpc } from "./webRemoteControl.js";
 import {
   loadCliMcpFromUserDirectory,
   migrateLegacyCommonMcp,
@@ -2064,6 +2065,8 @@ app.whenReady().then(async () => {
     },
     logger,
   });
+
+  registerWebRemoteControlIpc();
 
   registerPlatformIpcHandlers({
     fetchHelpConfig: readHelpConfig,
