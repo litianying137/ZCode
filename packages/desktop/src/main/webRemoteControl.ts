@@ -12,7 +12,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { homedir, hostname, networkInterfaces } from "node:os";
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
-import { app, type BrowserWindow } from "electron";
+import { app, BrowserWindow } from "electron";
 import { WebSocket } from "ws";
 import { DEFAULT_ZCODE_ENDPOINT_ORIGIN, ZCODE_VERSION } from "@zcode/shared";
 
@@ -66,20 +66,19 @@ function resolveDeviceName(): string {
 
 // ── relay WS URL + mobile URL ──
 
-function resolveRelayWsUrl(endpointOrigin: string): string {
+// relay 实测（2026-10-06 curl 握手探测）：wss://zcode.z.ai/ws 返回 HTTP 101（存活），
+// chatglm.site 已不可达。手机端 SPA 也部署在 zcode.z.ai，两端必须连同一 relay。
+const RELAY_WS_DEFAULT = "wss://zcode.z.ai/ws";
+const MOBILE_URL_DEFAULT = "https://zcode.z.ai/remote/v4";
+
+function resolveRelayWsUrl(_endpointOrigin: string): string {
   const override = process.env.ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL?.trim();
-  if (override) return override;
-  // endpoint origin → wss + /ws
-  const url = new URL(endpointOrigin);
-  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
-  url.pathname = "/ws";
-  return url.toString();
+  return override || RELAY_WS_DEFAULT;
 }
 
-function resolveMobileUrl(endpointOrigin: string): string {
+function resolveMobileUrl(_endpointOrigin: string): string {
   const override = process.env.ZCODE_WEB_REMOTE_CONTROL_URL?.trim();
-  if (override) return override;
-  return `${endpointOrigin.replace(/\/+$/, "")}/remote/v4`;
+  return override || MOBILE_URL_DEFAULT;
 }
 
 function buildQrUrl(params: {
@@ -136,6 +135,7 @@ class RelayClient {
   private qrUrl: string | null = null;
   private error: string | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
+  private connectTimeout: NodeJS.Timeout | null = null;
   private disposed = false;
 
   constructor(private options: RelayClientOptions) {
@@ -149,10 +149,7 @@ class RelayClient {
 
   dispose(): void {
     this.disposed = true;
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    this.clearTimers();
     if (this.ws) {
       this.ws.removeAllListeners();
       if (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING) {
@@ -163,15 +160,42 @@ class RelayClient {
     this.setState("idle");
   }
 
+  private clearTimers(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.connectTimeout) {
+      clearTimeout(this.connectTimeout);
+      this.connectTimeout = null;
+    }
+  }
+
   private connect(): void {
     if (this.disposed) return;
     this.setState("connecting");
+    console.log(`[web-remote-control] connecting to ${this.options.relayWsUrl}`);
 
     const ws = new WebSocket(this.options.relayWsUrl);
     this.ws = ws;
 
+    // 10 秒连接超时
+    this.connectTimeout = setTimeout(() => {
+      if (this.state === "connecting" || this.state === "registering") {
+        console.log("[web-remote-control] connection timeout");
+        this.error = "连接超时，请检查网络";
+        this.setState("error");
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 10_000);
+
     ws.on("open", () => {
       if (this.disposed || ws !== this.ws) return;
+      console.log("[web-remote-control] ws connected, registering device");
       this.setState("registering");
       this.send({
         type: "device_register_init",
@@ -188,17 +212,26 @@ class RelayClient {
 
     ws.on("message", (data: Buffer) => {
       if (this.disposed || ws !== this.ws) return;
+      if (this.connectTimeout) {
+        clearTimeout(this.connectTimeout);
+        this.connectTimeout = null;
+      }
       try {
         const msg = JSON.parse(data.toString("utf-8"));
+        console.log(`[web-remote-control] recv type=${msg.type}`);
         this.handleMessage(msg);
       } catch {
         // ignore malformed
       }
     });
 
-    ws.on("close", () => {
+    ws.on("close", (code: number, reason: Buffer) => {
       if (this.disposed || ws !== this.ws) return;
+      console.log(
+        `[web-remote-control] ws closed code=${code} reason=${reason?.toString("utf-8") ?? ""}`,
+      );
       this.ws = null;
+      this.clearTimers();
       if (this.state !== "error") {
         this.scheduleReconnect();
       }
@@ -206,6 +239,7 @@ class RelayClient {
 
     ws.on("error", (err: Error) => {
       if (this.disposed || ws !== this.ws) return;
+      console.log(`[web-remote-control] ws error: ${err.message}`);
       this.error = err.message;
       this.setState("error");
     });
