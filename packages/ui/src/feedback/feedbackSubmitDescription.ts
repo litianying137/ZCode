@@ -7,7 +7,7 @@ import type {
 } from "@zcode/shared";
 
 const TITLE_MAX = 80;
-const FEEDBACK_ZCODE_AGENT_LABEL = "OpenCode Agent";
+const FEEDBACK_ZCODE_AGENT_LABEL = "Codety Agent";
 
 type MessageFormatter = (descriptor: { id: string }, values?: Record<string, string>) => string;
 

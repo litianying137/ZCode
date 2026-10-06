@@ -5,7 +5,7 @@
 
 ## 决策
 
-本仓库是对官网 `zai-org/ZCode` 的私有改造副本，对外身份为 `opencode`。自动更新**整体关闭**，对所有产品 flavor（production / preview）一律生效，不允许被构建参数或运行时开关重新打开。
+本仓库是对官网 `zai-org/ZCode` 的私有改造副本，对外身份为 `codety`。自动更新**整体关闭**，对所有产品 flavor（production / preview）一律生效，不允许被构建参数或运行时开关重新打开。
 
 原因：
 

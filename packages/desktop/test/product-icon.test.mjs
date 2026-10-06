@@ -10,10 +10,10 @@ const repoRoot = join(here, "../../..");
 const read = (relativePath) => readFileSync(join(repoRoot, relativePath));
 const sha256 = (relativePath) => createHash("sha256").update(read(relativePath)).digest("hex");
 
-// 锚定 opencode 官方 prod 图标（opencode/packages/desktop/icons/prod/），
+// 锚定 codety 官方 prod 图标（codety/packages/desktop/icons/prod/），
 // 防止图标被替换回本地生成素材或旧 ZCode 图标。
 // icns 是官方 512 源按 macOS 标准网格（内容 824/1024 + 透明留白）重合成的，
-// 避免满幅图标在 Dock 中比其他 app 大一圈（opencode 官方 README 记录了同样的问题）。
+// 避免满幅图标在 Dock 中比其他 app 大一圈（codety 官方 README 记录了同样的问题）。
 const OFFICIAL_SHA256 = {
   "packages/desktop/build/icon.icns":
     "3307859d3604ec84ad3fd29d9ac03734b392b5cacef7c0d81b992cd25fa10f9d",
@@ -26,7 +26,7 @@ const OFFICIAL_SHA256 = {
 };
 
 for (const [relativePath, expected] of Object.entries(OFFICIAL_SHA256)) {
-  test(`图标为 opencode 官方资产：${relativePath}`, () => {
+  test(`图标为 codety 官方资产：${relativePath}`, () => {
     assert.equal(sha256(relativePath), expected);
   });
 }
@@ -42,7 +42,7 @@ test("安装图标与应用图标一致（官方无独立安装图标）", () =>
   );
 });
 
-test("DMG 背景为 OpenCode 品牌且尺寸正确", () => {
+test("DMG 背景为 Codety 品牌且尺寸正确", () => {
   const png = read("packages/desktop/build/dmg_background.png");
   // PNG 宽高位于 IHDR：宽 540 高 380（大端）
   assert.equal(png.readUInt32BE(16), 540);
@@ -54,7 +54,7 @@ test("DMG 背景为 OpenCode 品牌且尺寸正确", () => {
   assert.notEqual(sha256("packages/desktop/build/dmg_background.png"), sha256("packages/desktop/build/icon.png"));
 });
 
-test("应用内品牌组件使用 opencode 官方 Mark，Z 字形不回潮", () => {
+test("应用内品牌组件使用 codety 官方 Mark，Z 字形不回潮", () => {
   const markPath = "M12 4H4V16H12V4ZM16 20H0V0H16V20Z";
   for (const relativePath of [
     "packages/ui/src/components/ui/ZCodeAboutLogo.tsx",
@@ -68,7 +68,7 @@ test("应用内品牌组件使用 opencode 官方 Mark，Z 字形不回潮", () 
     assert.match(
       source,
       new RegExp(markPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
-      `${relativePath} 未使用 opencode 官方 Mark`,
+      `${relativePath} 未使用 codety 官方 Mark`,
     );
     assert.doesNotMatch(
       source,
@@ -101,7 +101,7 @@ test("macOS Dock 图标用带边距的 icon_dock.png，不得回退满幅 icon.p
   );
 });
 
-test("顶栏小徽标是 opencode mark badge", () => {
+test("顶栏小徽标是 codety mark badge", () => {
   for (const relativePath of [
     "packages/ui/src/App.tsx",
     "packages/ui/src/WindowsTopLeftLogo.tsx",
@@ -109,14 +109,14 @@ test("顶栏小徽标是 opencode mark badge", () => {
   ]) {
     assert.match(
       read(relativePath).toString("utf8"),
-      /opencode-mark-badge\.svg/,
-      `${relativePath} 未接入 opencode-mark-badge.svg`,
+      /codety-mark-badge\.svg/,
+      `${relativePath} 未接入 codety-mark-badge.svg`,
     );
   }
   // DesktopTopOverlay 的 logo 由 App.tsx 通过 appLogoUrl prop 传入，这里只验证 alt。
-  assert.match(read("packages/ui/src/DesktopTopOverlay.tsx").toString("utf8"), /alt="OpenCode"/);
+  assert.match(read("packages/ui/src/DesktopTopOverlay.tsx").toString("utf8"), /alt="Codety"/);
   assert.doesNotMatch(
-    read("packages/ui/src/assets/opencode-mark-badge.svg").toString("utf8"),
+    read("packages/ui/src/assets/codety-mark-badge.svg").toString("utf8"),
     /M134\.4 0\.130152/,
   );
 });

@@ -6,25 +6,25 @@
 export const ZCODE_PREVIEW_IDENTITY_ENV = "ZCODE_PREVIEW_IDENTITY";
 
 /**
- * 产品身份权威值取自 opencode 官方源码（packages/desktop/electron-builder.config.ts）：
- * prod → OpenCode / ai.opencode.desktop，beta → OpenCode Beta / ai.opencode.desktop.beta。
+ * 产品身份权威值取自 codety 官方源码（packages/desktop/electron-builder.config.ts）：
+ * prod → Codety / ai.codety.desktop，beta → Codety Beta / ai.codety.desktop.beta。
  * 本仓库的 preview flavor 对应官方 beta 档位。
  */
 const PRODUCTION_IDENTITY = Object.freeze({
   flavor: "production",
-  appId: "ai.opencode.desktop",
-  productName: "OpenCode",
-  linuxExecutableName: "opencode",
-  linuxPackageName: "opencode",
+  appId: "ai.codety.desktop",
+  productName: "Codety",
+  linuxExecutableName: "codety",
+  linuxPackageName: "codety",
   cuaHelperInstallVariant: null,
 });
 
 const PREVIEW_IDENTITY = Object.freeze({
   flavor: "preview",
-  appId: "ai.opencode.desktop.beta",
-  productName: "OpenCode Beta",
-  linuxExecutableName: "opencode-beta",
-  linuxPackageName: "opencode-beta",
+  appId: "ai.codety.desktop.beta",
+  productName: "Codety Beta",
+  linuxExecutableName: "codety-beta",
+  linuxPackageName: "codety-beta",
   cuaHelperInstallVariant: "preview",
 });
 
@@ -89,7 +89,7 @@ export function resolveDesktopArtifactSuffix(env = process.env) {
  */
 export function resolveWindowsAppUserModelIdForFlavor(flavor, runtime = { isPackaged: true }) {
   if (runtime.isPackaged === false) {
-    return "ai.opencode.desktop.dev";
+    return "ai.codety.desktop.dev";
   }
   return desktopProductIdentities[flavor === "preview" ? "preview" : "production"].appId;
 }

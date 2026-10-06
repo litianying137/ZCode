@@ -59,21 +59,22 @@ function isTruthyRuntimeEnvOverride(name: string): boolean {
 // 触发 Electron 单实例锁后只激活已有窗口，Chromedriver 无法接管测试进程。
 // 这里允许测试显式隔离运行时身份，正常桌面/远控路径保持原来的默认值。
 const runtimeApplicationNameOverride = readRuntimeEnvOverride("ZCODE_DESKTOP_APPLICATION_NAME");
-// 对外显示名取 opencode 官方值（opencode 源码 packages/desktop/src/main/index.ts：
-// prod "OpenCode"、beta "OpenCode Beta"、dev "OpenCode Dev"）。
+// 对外显示名取 codety 官方值（codety 源码 packages/desktop/src/main/index.ts：
+// prod "Codety"、beta "Codety Beta"、dev "Codety Dev"）。
 export const runtimeApplicationName =
   runtimeApplicationNameOverride ??
   (isLocalDevelopmentRuntime
-    ? "OpenCode Dev"
+    ? "Codety Dev"
     : isPreviewPackagedRuntime
-      ? "OpenCode Beta"
-      : "OpenCode");
-// 数据目录名刻意保持 zcode 原名：本地配置、登录态和项目记录必须继续走 zcode 原有路径
-// （见田迎CODETY_REBRAND.md 第 2 节）。显示名（opencode）与数据目录名（zcode）解耦，
-// 改显示名不能连带迁移用户数据。测试覆盖仍同时改写两个名字以保持隔离语义。
+      ? "Codety Beta"
+      : "Codety");
+// 数据目录名：codety-scan 验证分支改为 Codety 独立目录，避免与并行的
+// OpenCode/ZCode 共用 ~/Library/Application Support/ZCode 触发 Electron
+// 单实例锁直接退出（两者需可同时运行对比验证）。登录态等本地数据不迁移，
+// relay 认证不依赖账号登录态，不影响扫码远控链路验证。
 const runtimeDataDirName =
   runtimeApplicationNameOverride ??
-  (isLocalDevelopmentRuntime ? "ZCode Dev" : isPreviewPackagedRuntime ? "ZCode Preview" : "ZCode");
+  (isLocalDevelopmentRuntime ? "Codety Dev" : isPreviewPackagedRuntime ? "Codety Preview" : "Codety");
 // Electron 的 app.getPath("home") 不一定跟随测试进程里的 HOME 覆盖。
 // e2e 默认工作区依赖 home 路径，因此提供显式覆盖，避免测试写到开发者真实 ~/ZCodeProject。
 export const runtimeHomePath = readRuntimeEnvOverride("ZCODE_DESKTOP_HOME_DIR");

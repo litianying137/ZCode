@@ -20,7 +20,7 @@ import { DEFAULT_ZCODE_ENDPOINT_ORIGIN, ZCODE_VERSION } from "@zcode/shared";
 // uncaught exception 弹窗；所有诊断日志必须走安全输出。
 function safeLog(message: string): void {
   try {
-    safeLog(message);
+    console.log(message);
   } catch {
     // swallow EIO/EPIPE
   }
@@ -271,9 +271,9 @@ class RelayClient {
       );
       this.ws = null;
       this.clearTimers();
-      if (this.state !== "error") {
-        this.scheduleReconnect();
-      }
+      // 旧版语义：任何断开（含 KICKED / error 后的 close）都走重连；KICKED 是 relay
+      // 在 terminal 异常断开后踢设备重置会话，设备必须重连重新注册，不能停在 error。
+      this.scheduleReconnect();
     });
 
     ws.on("error", (err: Error) => {
@@ -313,6 +313,7 @@ class RelayClient {
             deviceName: this.options.deviceName,
             appVersion: this.options.appVersion,
           });
+          safeLog(`[web-remote-control] qr url: ${this.qrUrl}`);
           this.setState("authenticating");
           // 发 auth_init
           this.send({
@@ -347,10 +348,9 @@ class RelayClient {
       }
       case "auth_ack":
       case "pair_status_ack": {
-        // auth_ack 的 pair_status 可能是 waiting（设备已认证、等手机扫码）
-        // 或 paired（手机已配对）。旧版语义：waiting → waiting_terminal。
+        // 旧版实测 pair_status 值为 "waiting"（等手机扫码）或 "matched"（已有手机配对）。
         const pairStatus = (msg.pair_status as string) ?? "";
-        if (pairStatus === "paired") {
+        if (pairStatus === "matched") {
           this.setState("paired");
         } else if (type === "auth_ack" || pairStatus === "waiting") {
           this.setState("waiting_terminal");
@@ -364,13 +364,23 @@ class RelayClient {
         break;
       }
       case "data": {
-        // 手机→桌面的 RPC 帧。当前记录帧摘要用于逆向 RPC 层（下一阶段接 workspace bridge）。
+        // 手机→桌面的 RPC 载荷。旧版协议有两种格式：
+        // 1. 控制帧（zcode_type="bootstrap-request" / "workspace-list-request" / "platform-request" / 等）
+        // 2. RPC 传输帧（zcode_type="rpc-frame" / "rpc-frame-ack"）走 AcknowledgedRelayProtocol，
+        //    经 MessagePort 桥到 host workspace 的 ServiceCollection。
         const payload = msg.payload;
-        const summary =
-          typeof payload === "string"
-            ? payload.slice(0, 200)
-            : JSON.stringify(payload)?.slice(0, 200);
-        safeLog(`[web-remote-control] data frame: ${summary ?? "(empty)"}`);
+        if (typeof payload !== "object" || payload === null) {
+          safeLog(`[web-remote-control] data frame: non-object payload=${String(payload).slice(0, 200)}`);
+          break;
+        }
+        const p = payload as Record<string, unknown>;
+        const ztype = p.zcode_type as string | undefined;
+        safeLog(`[web-remote-control] data frame: zcode_type=${ztype} seq=${p.seq ?? ""} requestId=${p.requestId ?? ""} bridgeSessionId=${p.bridgeSessionId ?? ""}`);
+        try {
+          routeControlPayload(p);
+        } catch (err) {
+          safeLog(`[web-remote-control] route payload error: ${err instanceof Error ? err.message : String(err)}`);
+        }
         break;
       }
       case "error": {
@@ -379,6 +389,15 @@ class RelayClient {
         break;
       }
     }
+  }
+
+  /** 向 relay 发送任意 data 帧（设备→手机）。 */
+  sendPayload(payload: Record<string, unknown>): void {
+    const ready = this.ws?.readyState === WebSocket.OPEN;
+    safeLog(
+      `[web-remote-control] send data zcode_type=${String(payload.zcode_type)} requestId=${String(payload.requestId ?? "")} state=${this.state} wsOpen=${ready}`,
+    );
+    this.send({ type: "data", payload, client_ts: Date.now() });
   }
 
   private setState(next: RelayState): void {
@@ -392,6 +411,10 @@ class RelayClient {
       deviceSid: this.deviceSid,
       error: this.error,
     });
+    // 进入 paired 时启动工作区列表推送
+    if (next === "paired") {
+      scheduleWorkspaceListPush();
+    }
   }
 
   getStatus(): RelayStatus {
@@ -407,6 +430,194 @@ class RelayClient {
 // ── 管理器（单例）──
 
 let client: RelayClient | null = null;
+
+// ── 控制载荷路由（data 帧 → 本地服务）──
+
+// 每 10s 推送 workspace-list-updated。旧版通过对比签名避免冗余推送。
+let workspaceListPushTimer: NodeJS.Timeout | null = null;
+function scheduleWorkspaceListPush(): void {
+  if (workspaceListPushTimer) return;
+  workspaceListPushTimer = setInterval(() => {
+    if (!client) return;
+    const status = client.getStatus();
+    if (status.state !== "paired") return;
+    safeLog("[web-remote-control] push workspace list updated");
+    client.sendPayload({
+      zcode_type: "workspace-list-updated",
+      result: buildWorkspaceList(),
+    });
+  }, 10_000);
+}
+
+function routeControlPayload(payload: Record<string, unknown>): void {
+  const ztype = payload.zcode_type as string;
+  switch (ztype) {
+    case "bootstrap-request": {
+      const requestId = payload.requestId as string;
+      sendToRelay({
+        zcode_type: "bootstrap-response",
+        requestId,
+        success: true,
+        result: buildBootstrapResult(),
+      });
+      break;
+    }
+    case "workspace-list-request": {
+      const requestId = payload.requestId as string;
+      sendToRelay({
+        zcode_type: "workspace-list-response",
+        requestId,
+        success: true,
+        result: buildWorkspaceList(),
+      });
+      break;
+    }
+    case "workspace-bridge-open": {
+      safeLog(`[web-remote-control] workspace-bridge-open received: workspaceKey=${payload.workspaceKey as string} bridgeSessionId=${payload.bridgeSessionId as string}`);
+      // 手机请求打开某个工作区的 bridge。旧版会从 host 拿一个 MessagePort 创建双向协议桥。
+      // 当前先回复 workspace-bridge-error，让手机显示"桥接失败"但不崩溃。待下一阶段实现。
+      handleWorkspaceBridgeOpen(payload).catch((err) => {
+        safeLog(`[web-remote-control] workspace-bridge-open failed: ${err.message}`);
+        sendToRelay({
+          zcode_type: "workspace-bridge-error",
+          requestId: payload.requestId as string,
+          bridgeSessionId: payload.bridgeSessionId as string,
+          ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
+          reason: "not-implemented",
+          error: err.message,
+        });
+      });
+      break;
+    }
+    case "workspace-reconnect-request": {
+      sendToRelay({
+        zcode_type: "workspace-reconnect-response",
+        requestId: payload.requestId as string,
+        workspaceKey: payload.workspaceKey as string,
+        success: false,
+        error: "not-implemented",
+      });
+      break;
+    }
+    case "platform-request": {
+      const requestId = payload.requestId as string;
+      const method = payload.method as string;
+      safeLog(`[web-remote-control] platform request: method=${method} args=${JSON.stringify(payload.args as unknown).slice(0, 500)}`);
+      try {
+        const result = handlePlatformRequest(method, payload.args as Record<string, unknown> | undefined);
+        sendToRelay({
+          zcode_type: "platform-response",
+          requestId,
+          method,
+          success: true,
+          result,
+        });
+      } catch (err) {
+        sendToRelay({
+          zcode_type: "platform-response",
+          requestId,
+          method,
+          success: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      break;
+    }
+    case "mobile-view-state-update": {
+      safeLog(`[web-remote-control] mobile view state update: ${JSON.stringify(payload.viewState as Record<string, unknown>).slice(0, 200)}`);
+      break;
+    }
+    case "telemetry-report": {
+      // 静默忽略
+      break;
+    }
+    case "mobile-diagnostic": {
+      safeLog(`[web-remote-control] mobile diagnostic: ${JSON.stringify(payload as Record<string, unknown>).slice(0, 300)}`);
+      break;
+    }
+    default:
+      safeLog(`[web-remote-control] unhandled payload type: ${ztype}`);
+  }
+}
+
+function sendToRelay(payload: Record<string, unknown>): void {
+  if (!client) return;
+  const status = client.getStatus();
+  if (status.state !== "paired" && status.state !== "waiting_terminal") return;
+  client.sendPayload(payload);
+}
+
+function buildBootstrapResult(): Record<string, unknown> {
+  return {
+    windowControlSessionId: client?.getStatus().deviceSid ?? "unknown",
+    desktopAppVersion: ZCODE_VERSION,
+    workspaces: getWorkspaces(),
+    tasks: [],
+    initialViewState: null,
+    mobileViewState: null,
+  };
+}
+
+function buildWorkspaceList(): Record<string, unknown> {
+  return {
+    workspaces: getWorkspaces(),
+    tasks: [],
+    activeWorkspaceKey: getWorkspaces()[0]?.workspacePath ?? null,
+    activeTaskId: null,
+  };
+}
+
+function getWorkspaces(): Record<string, unknown>[] {
+  const windows = BrowserWindow.getAllWindows();
+  if (windows.length === 0) {
+    return [];
+  }
+  // 从所有窗口收集工作区。简单实现：返回一个本地工作区条目。
+  return [
+    {
+      kind: "local",
+      workspacePath: "default",
+      workspaceIdentity: undefined,
+      connectionState: "connected",
+    },
+  ];
+}
+
+async function handleWorkspaceBridgeOpen(payload: Record<string, unknown>): Promise<void> {
+  const bridgeSessionId = payload.bridgeSessionId as string;
+  const workspaceKey = payload.workspaceKey as string;
+  // 简版：回复 bridge-ready 但不建立实际 host bridge（让手机 SPA 进入 UI 界面但不推送数据）
+  sendToRelay({
+    zcode_type: "workspace-bridge-ready",
+    requestId: payload.requestId as string,
+    bridgeSessionId,
+    ...(payload.bridgeGeneration !== undefined ? { bridgeGeneration: payload.bridgeGeneration as number } : {}),
+    bridge: {
+      bridgeSessionId,
+      bridgeGeneration: (payload.bridgeGeneration as number) ?? 0,
+      workspaceKey,
+      workspacePath: workspaceKey,
+      kind: "local",
+    },
+  });
+  safeLog(`[web-remote-control] workspace bridge ready (stub) session=${bridgeSessionId} workspace=${workspaceKey}`);
+}
+
+function handlePlatformRequest(method: string, args: Record<string, unknown> | undefined): unknown {
+  switch (method) {
+    case "focus":
+      // 手机要求桌面窗口前置
+      for (const win of BrowserWindow.getAllWindows()) {
+        if (!win.isDestroyed()) {
+          win.focus();
+          break;
+        }
+      }
+      return true;
+    default:
+      throw new Error(`Unimplemented platform method: ${method}`);
+  }
+}
 
 export function startWebRemoteControl(): RelayStatus {
   if (client) {

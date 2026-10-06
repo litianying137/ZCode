@@ -26,7 +26,7 @@ export function scanZCodeDataDirectoryInWorker(
     };
     const abort = () => {
       void worker.terminate();
-      finish(() => reject(new DOMException("OpenCode data size scan aborted", "AbortError")));
+      finish(() => reject(new DOMException("Codety data size scan aborted", "AbortError")));
     };
 
     worker.once("message", (message: unknown) => {
@@ -40,7 +40,7 @@ export function scanZCodeDataDirectoryInWorker(
           new Error(
             response.ok === false && typeof response.error === "string"
               ? response.error
-              : "Invalid OpenCode data size worker response",
+              : "Invalid Codety data size worker response",
           ),
         ),
       );

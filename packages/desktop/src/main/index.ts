@@ -1345,7 +1345,7 @@ function confirmAppQuit(originWindow?: BrowserWindow | null) {
     defaultId: 1,
     cancelId: 1,
     title: isZh ? "退出确认" : "Confirm Quit",
-    message: isZh ? "确认退出 OpenCode?" : "Quit OpenCode?",
+    message: isZh ? "确认退出 Codety?" : "Quit Codety?",
     detail: detailLines.join("\n"),
     icon: nativeImage.createFromPath(iconPath),
   };
@@ -2020,7 +2020,7 @@ app.whenReady().then(async () => {
   logWindowsBundledRuntimeIntegrityDiagnostic();
 
   // 启动自动更新检查（后台执行，不阻塞主界面）
-  // 私有改造副本（opencode 身份）整体关闭自动更新：官方 feed 只分发 dev.zcode.app 身份的
+  // 私有改造副本（codety 身份）整体关闭自动更新：官方 feed 只分发 dev.zcode.app 身份的
   // 安装包，命中更新会把 rebrand 身份整个覆盖回原样。升级走手动 rebase + 重新打包。
   void initAutoUpdater({
     enabled: ZCODE_AUTO_UPDATE_ENABLED,

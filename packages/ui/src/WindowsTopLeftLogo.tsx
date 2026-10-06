@@ -1,5 +1,5 @@
 import { cn } from "@/components/lib/utils.js";
-import zaiLogoUrl from "@/assets/opencode-mark-badge.svg";
+import zaiLogoUrl from "@/assets/codety-mark-badge.svg";
 
 export function WindowsTopLeftLogo({
   className,
@@ -21,7 +21,7 @@ export function WindowsTopLeftLogo({
     >
       <img
         src={zaiLogoUrl}
-        alt="OpenCode"
+        alt="Codety"
         className={cn("pointer-events-none size-5 select-none", imageClassName)}
         draggable={false}
       />

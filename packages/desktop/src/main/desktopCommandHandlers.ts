@@ -360,7 +360,7 @@ function showZCodeEndpointPromptWindow(options: {
       resizable: false,
       minimizable: false,
       maximizable: false,
-      title: "OpenCode Endpoint",
+      title: "Codety Endpoint",
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,
@@ -658,7 +658,7 @@ export async function executeDesktopCommand(options: {
       } catch (error) {
         await showMessageBoxWithOptionalParent(targetWindow, {
           type: "error",
-          title: "OpenCode Endpoint",
+          title: "Codety Endpoint",
           message: "Endpoint 无效",
           detail: error instanceof Error ? error.message : String(error),
         });

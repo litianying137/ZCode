@@ -89,7 +89,7 @@ function parseWebhookAttachments(payload: Record<string, unknown>): BotInboundAt
 function parseWebhookElicitationResponse(
   payload: Record<string, unknown>,
 ): BotStructuredElicitationResponse | undefined {
-  if (payload.type !== "opencode.bot.elicitation_response") {
+  if (payload.type !== "codety.bot.elicitation_response") {
     return undefined;
   }
   const requestId =
@@ -147,10 +147,10 @@ export function createWebhookBotProvider(deps: WebhookProviderDeps): BotProvider
           method: "POST",
           headers: {
             "content-type": "application/json",
-            [bot.webhookAuthHeaderName || "x-opencode-bot-secret"]: secret ?? "",
+            [bot.webhookAuthHeaderName || "x-codety-bot-secret"]: secret ?? "",
           },
           body: JSON.stringify({
-            type: "opencode.bot.test",
+            type: "codety.bot.test",
             botId: bot.id,
             provider: "webhook",
             sentAt: Date.now(),
@@ -178,20 +178,20 @@ export function createWebhookBotProvider(deps: WebhookProviderDeps): BotProvider
         "content-type": "application/json",
       };
       if (secret) {
-        headers[bot.webhookAuthHeaderName || "x-opencode-bot-secret"] = secret;
+        headers[bot.webhookAuthHeaderName || "x-codety-bot-secret"] = secret;
       }
       const response = await postWebhookWithRetry(bot.webhookUrl, {
         method: "POST",
         headers,
         body: JSON.stringify({
-          type: "opencode.bot.message",
+          type: "codety.bot.message",
           botId: bot.id,
           provider: "webhook",
           userId: message.providerUserId,
           text: buildSelectionText(message),
           selection: message.selection,
           elicitation: message.elicitation,
-          ...(message.elicitation ? { type: "opencode.bot.elicitation_request" } : {}),
+          ...(message.elicitation ? { type: "codety.bot.elicitation_request" } : {}),
           sentAt: Date.now(),
         }),
       });

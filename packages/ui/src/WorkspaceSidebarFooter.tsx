@@ -67,7 +67,7 @@ function getSidebarProfileName(user?: UserInfo | null): string {
     return username;
   }
 
-  return "OpenCode";
+  return "Codety";
 }
 
 function getSidebarProfileBadge(

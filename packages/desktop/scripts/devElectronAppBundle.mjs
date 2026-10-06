@@ -2,8 +2,8 @@ import { access, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promis
 import { dirname, join } from "node:path";
 
 export const DEV_ELECTRON_PROTOCOL_SCHEME = "zcode";
-export const DEV_ELECTRON_APP_NAME = "OpenCode Dev";
-export const DEV_ELECTRON_APP_BUNDLE_ID = "ai.opencode.desktop.dev";
+export const DEV_ELECTRON_APP_NAME = "Codety Dev";
+export const DEV_ELECTRON_APP_BUNDLE_ID = "ai.codety.desktop.dev";
 // 副本布局版本，见 prepareDevElectronAppBundle 中的指纹说明。
 export const DEV_ELECTRON_BUNDLE_FORMAT = 2;
 

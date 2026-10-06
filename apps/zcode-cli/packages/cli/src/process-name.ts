@@ -1,5 +1,5 @@
 export const CLI_COMMAND_NAME = "zcode";
-export const CLI_PROCESS_NAME = "opencode-cli";
+export const CLI_PROCESS_NAME = "codety-cli";
 
 interface ProcessTitleTarget {
   title: string;

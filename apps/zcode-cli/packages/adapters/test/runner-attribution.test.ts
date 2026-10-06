@@ -61,8 +61,8 @@ test("第三方 baseURL 的 source headers 剥离 zcode 识别信息", () => {
   assert.equal(scoped["HTTP-Referer"], undefined);
   assert.equal(scoped["X-ZCode-App-Version"], undefined);
   assert.equal(scoped["X-ZCode-Agent"], undefined);
-  assert.equal(scoped["User-Agent"], "OpenCode/3.14.3");
-  assert.equal(scoped["X-Title"], "OpenCode@electron");
+  assert.equal(scoped["User-Agent"], "Codety/3.14.3");
+  assert.equal(scoped["X-Title"], "Codety@electron");
   assert.equal(scoped["X-Release-Channel"], "production");
 });
 

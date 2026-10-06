@@ -203,7 +203,7 @@ export class AiSdkModelExecution {
     // 重构后模型 SDK 曾只接到用户 Header，漏掉版本和站点归因；在公共绑定边界恢复，
     // 不依赖签名成功，不给各业务重复补头，也不修改 Provider 或已绑定 Model 的配置。
     // 归因 header 按目标 baseURL 分流：z.ai / bigmodel.cn 自有域保留 ZCode 归因全集，
-    // 第三方供应商剥离 zcode 命名 header（UA/X-Title 换 OpenCode），避免被识别为 zcode。
+    // 第三方供应商剥离 zcode 命名 header（UA/X-Title 换 Codety），避免被识别为 zcode。
     configuredProvider.headers = mergeModelRequestHeaders(
       withOpenRouterAttributionHeaders(
         scopeZCodeSourceHeadersForBaseUrl(this.defaultHeaders, configuredProvider.baseURL),

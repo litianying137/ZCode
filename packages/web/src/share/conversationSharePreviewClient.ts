@@ -244,7 +244,7 @@ export class ConversationSharePreviewClient {
       });
       throw new ConversationSharePreviewClientError({
         kind: "unsupported_schema_version",
-        message: "Conversation share requires a newer OpenCode version",
+        message: "Conversation share requires a newer Codety version",
         status: response.status,
       });
     }

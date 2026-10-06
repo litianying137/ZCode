@@ -39,7 +39,7 @@ export const ZCODE_PRODUCT_FLAVOR = normalizeZCodeProductFlavor(
 );
 
 /**
- * 自动更新能力开关：本仓库是私有改造副本（对外身份 opencode），更新 feed 只分发
+ * 自动更新能力开关：本仓库是私有改造副本（对外身份 codety），更新 feed 只分发
  * 官方 ZCode 安装包（dev.zcode.app 身份）。自动更新一旦命中，会把 rebrand 后的
  * 应用覆盖回原身份（图标、进程名、Bundle ID 全部回退），因此对所有 flavor 关闭。
  * 升级方式改为手动：rebase 上游后按文档重新打包。恢复自动更新前必须先自建 feed。

@@ -287,7 +287,7 @@ Slash Commands:
     },
     terminal: {
       requiresInteractive: "TUI requires an interactive terminal.",
-      starting: "Starting OpenCode... Ctrl+C to exit",
+      starting: "Starting Codety... Ctrl+C to exit",
     },
     transcript: {
       compact: {

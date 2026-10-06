@@ -79,7 +79,7 @@ export function isZCodeOwnedBaseUrl(baseUrl: string | undefined): boolean {
  * 按目标 baseURL 分流归因 header：z.ai / bigmodel.cn 自有域保留 ZCode 归因全集
  * （Coding Plan 后端依赖 User-Agent / X-Title / X-ZCode-* 做客户端识别与路由）；
  * 第三方 openai-compatible 供应商（自定义 baseURL）不得从 header 识别出客户端是
- * zcode —— 剥离 zcode 命名与指向自有域的 Referer，UA / X-Title 换成 OpenCode。
+ * zcode —— 剥离 zcode 命名与指向自有域的 Referer，UA / X-Title 换成 Codety。
  */
 export function scopeZCodeSourceHeadersForBaseUrl(
   headers: Record<string, string>,
@@ -95,11 +95,11 @@ export function scopeZCodeSourceHeadersForBaseUrl(
       continue;
     }
     if (key === "User-Agent" && value.startsWith("ZCode/")) {
-      scoped[key] = `OpenCode/${value.slice("ZCode/".length)}`;
+      scoped[key] = `Codety/${value.slice("ZCode/".length)}`;
       continue;
     }
     if (key === "X-Title" && value.startsWith("Z Code@")) {
-      scoped[key] = `OpenCode@${value.slice("Z Code@".length)}`;
+      scoped[key] = `Codety@${value.slice("Z Code@".length)}`;
       continue;
     }
     scoped[key] = value;

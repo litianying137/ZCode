@@ -4,12 +4,12 @@ import { join } from "node:path";
 import { spawn } from "node:child_process";
 import type { Locale } from "@zcode/shared";
 
-const WORKFLOW_NAME = "Open in OpenCode.workflow";
+const WORKFLOW_NAME = "Open in Codety.workflow";
 const WORKFLOW_BUNDLE_ID = "dev.zcode.app.finder-open-workflow";
 const WORKFLOW_VERSION = "5";
 const SERVICES_MENU_LABELS: Record<Locale, string> = {
-  "zh-CN": "在OpenCode中打开",
-  "en-US": "Open in OpenCode",
+  "zh-CN": "在Codety中打开",
+  "en-US": "Open in Codety",
 };
 
 const workflowScript = `first=""

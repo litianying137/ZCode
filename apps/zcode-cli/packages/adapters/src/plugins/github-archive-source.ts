@@ -91,7 +91,7 @@ export async function resolveGitHubArchiveSource(
   const resolved = await resolveHttpZipSource({
     headers: {
       Accept: "application/vnd.github+json",
-      "User-Agent": "OpenCode-Plugin-Installer",
+      "User-Agent": "Codety-Plugin-Installer",
     },
     requireSingleRoot: true,
     signal: input.signal,
