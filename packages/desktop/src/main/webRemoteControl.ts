@@ -355,6 +355,10 @@ class RelayClient {
         } else if (type === "auth_ack" || pairStatus === "waiting") {
           this.setState("waiting_terminal");
         }
+        // 心跳 ack 节流日志：约每 30s 一条，确认 relay 会话存活
+        if (Date.now() - this.lastPairStatusAckAt > 30_000) {
+          safeLog(`[web-remote-control] heartbeat ok (pair_status=${pairStatus || "n/a"})`);
+        }
         this.lastPairStatusAckAt = Date.now();
         this.scheduleHeartbeat();
         break;
@@ -378,6 +382,9 @@ class RelayClient {
   }
 
   private setState(next: RelayState): void {
+    if (this.state !== next) {
+      safeLog(`[web-remote-control] state ${this.state} -> ${next}`);
+    }
     this.state = next;
     this.options.onStateChange({
       state: this.state,
