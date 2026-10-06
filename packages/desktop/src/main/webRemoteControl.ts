@@ -16,6 +16,16 @@ import { app, BrowserWindow } from "electron";
 import { WebSocket } from "ws";
 import { DEFAULT_ZCODE_ENDPOINT_ORIGIN, ZCODE_VERSION } from "@zcode/shared";
 
+// stdout 管道断开（终端关闭/Ctrl+C 后进程仍在）时 console.log 会抛 EIO 导致
+// uncaught exception 弹窗；所有诊断日志必须走安全输出。
+function safeLog(message: string): void {
+  try {
+    safeLog(message);
+  } catch {
+    // swallow EIO/EPIPE
+  }
+}
+
 // ── auth 加密 ──
 
 function createPassword(): string {
@@ -174,7 +184,7 @@ class RelayClient {
   private connect(): void {
     if (this.disposed) return;
     this.setState("connecting");
-    console.log(`[web-remote-control] connecting to ${this.options.relayWsUrl}`);
+    safeLog(`[web-remote-control] connecting to ${this.options.relayWsUrl}`);
 
     const ws = new WebSocket(this.options.relayWsUrl);
     this.ws = ws;
@@ -182,7 +192,7 @@ class RelayClient {
     // 10 秒连接超时
     this.connectTimeout = setTimeout(() => {
       if (this.state === "connecting" || this.state === "registering") {
-        console.log("[web-remote-control] connection timeout");
+        safeLog("[web-remote-control] connection timeout");
         this.error = "连接超时，请检查网络";
         this.setState("error");
         try {
@@ -195,7 +205,7 @@ class RelayClient {
 
     ws.on("open", () => {
       if (this.disposed || ws !== this.ws) return;
-      console.log("[web-remote-control] ws connected, registering device");
+      safeLog("[web-remote-control] ws connected, registering device");
       this.setState("registering");
       this.send({
         type: "device_register_init",
@@ -218,7 +228,10 @@ class RelayClient {
       }
       try {
         const msg = JSON.parse(data.toString("utf-8"));
-        console.log(`[web-remote-control] recv type=${msg.type}`);
+        const raw = JSON.stringify(msg);
+        safeLog(
+          `[web-remote-control] recv type=${msg.type}${msg.type === "error" || msg.type === "auth_ack" ? ` body=${raw.slice(0, 500)}` : ""}`,
+        );
         this.handleMessage(msg);
       } catch {
         // ignore malformed
@@ -227,7 +240,7 @@ class RelayClient {
 
     ws.on("close", (code: number, reason: Buffer) => {
       if (this.disposed || ws !== this.ws) return;
-      console.log(
+      safeLog(
         `[web-remote-control] ws closed code=${code} reason=${reason?.toString("utf-8") ?? ""}`,
       );
       this.ws = null;
@@ -239,7 +252,7 @@ class RelayClient {
 
     ws.on("error", (err: Error) => {
       if (this.disposed || ws !== this.ws) return;
-      console.log(`[web-remote-control] ws error: ${err.message}`);
+      safeLog(`[web-remote-control] ws error: ${err.message}`);
       this.error = err.message;
       this.setState("error");
     });
