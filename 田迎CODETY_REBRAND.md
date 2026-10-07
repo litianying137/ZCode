@@ -1052,3 +1052,37 @@ apps/zcode-cli adapters auth/cli 错误信息                   凭据/配置定
 - 禁止让 package.json 版本号流入任何远控对外载荷（含 UA 之外的一切）。
 - 排障锚点：配对成功但"同步工作区"后 Not Found = 白名单违规；
   `~/.zcode/v2/logs/` 中 `[wrc-diag]`/`pair_status` 可看桌面侧实况。
+
+### 15.13 Web 远程控制主进程 OOM crash 定案（2026-10-07，修复=610ed21/955c354）
+
+症状：一天两次 crash，签名完全一致——`EXC_BREAKPOINT (brk 0)`、主线程
+CrBrowserMain、栈含 node::InternalMakeCallback + JIT JS 帧。
+
+定位方法（下次可直接复用）：
+- `~/.zcode/v2/logs/YYYY-MM-DD.log` 的 `[memory] role=main` 行有主进程堆
+  采样：crash 实例临终前 heapUsedKb≈4062175（撞 V8 4GB 上限），且堆暴涨
+  时点与手机建立 bridge 的事件精确同步；`arrayBuffersKb=0` 说明全是纯 JS
+  字符串。macOS crash 报告本身只有 brk 0，V8 FATAL 文案随 Finder 启动的
+  stderr 丢弃，`[memory]` 采样是唯一现场。
+
+根因与修复（commit 610ed21）：
+- **主因**：transport `flush()` 每条新消息全量重发未 ACK 队列 → N 条突发
+  O(N²) 帧 base64+JSON 字符串，V8 惰性 GC 跟不上 → 主进程堆破 4GB。
+  已改为按物理 seq 只发未发过的帧，重放仅由 `replayUnacknowledged()` 显式触发。
+- 次因一并修：分片尺寸二分探测（每消息 ~20×1.4MB 临时串）→ 解析式求解；
+  手写逐字符 base64 → Buffer 原生；outbound 无滞留上限 → 64MB 上限+丢弃
+  报 `retentionOverflow`；无发送背压 → `ws.bufferedAmount>8MB` 丢帧；
+  KICKED/AUTH_FAILED/停止不销毁 bridge → 统一 dispose；host→relay 发送
+  加 try/catch（16MiB 上限抛错不再变主进程未捕获异常）。
+- **safeLog 自递归**（首次 cherry-pick 冲突解决丢失修复行导致全部远控日志
+  静默）已修，并接入结构化文件日志；bridge 存活期每 30s 输出 `[wrc-diag]`
+  （retainedKB/acked/ dropped/wsBufferedKB/heapMB）。
+
+官方对齐（commit 955c354，反编译线上 app，见官方架构记录）：relay WS 开
+perMessageDeflate；sendPayload 序列化一次复用、>1MiB 信封拒发；收端组装
+30s 超时；发送侧 8MB 保险上限。
+
+巡检纪律：远控重度使用后看一眼最新 `[wrc-diag]`——`retainedKB` 持续上涨
+不回落、`dropped` 增长、`heapMB` 单调爬升，任一出现即停止使用并回报，
+不要等 crash。另：改远控代码必须跑
+`node --test packages/desktop/test/web-remote-control-rpc-transport.test.ts`。
