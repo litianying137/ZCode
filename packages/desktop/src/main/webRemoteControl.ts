@@ -110,7 +110,7 @@ const MOBILE_URL_DEFAULT = "https://zcode.z.ai/remote/v4";
 //    URL 再刷新——注册报 3.14.6 时，即使 QR 写 3.14.3 也会被改回 3.14.6 后 404。
 // 因此两处统一上报我们实际基于的上游基线版本；本地 package.json 版本号仅供
 // crash 报告区分构建，与此解耦。
-const RELAY_COMPAT_APP_VERSION = "3.14.3";
+const RELAY_COMPAT_APP_VERSION = "3.14.4";
 
 function resolveRelayWsUrl(_endpointOrigin: string, deviceMid?: string): string {
   const override = process.env.ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL?.trim();
