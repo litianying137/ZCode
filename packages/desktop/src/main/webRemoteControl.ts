@@ -377,7 +377,7 @@ class RelayClient {
         const msg = JSON.parse(data.toString("utf-8"));
         const raw = JSON.stringify(msg);
         safeLog(
-          `[web-remote-control] recv type=${msg.type}${msg.type === "error" || msg.type === "auth_ack" ? ` body=${raw.slice(0, 500)}` : ""}`,
+          `[web-remote-control] recv type=${msg.type}${msg.type === "error" || msg.type === "auth_ack" || msg.type === "pair_status_ack" ? ` body=${raw.slice(0, 500)}` : ""}`,
         );
         this.handleMessage(msg);
       } catch {
@@ -488,10 +488,14 @@ class RelayClient {
       }
       case "auth_ack":
       case "pair_status_ack": {
-        // auth_ack 的 pair_status 可能是 waiting（设备已认证、等手机扫码）
-        // 或 paired（手机已配对）。旧版语义：waiting → waiting_terminal。
+        // relay 实际会返回 matched（官方线上 app 也兼容 paired）；waiting 表示
+        // 设备已认证、仍等手机扫码。此前合并冲突丢掉 matched 分支，导致手机已
+        // 报 paired 但桌面一直 waiting_terminal，bootstrap 后手机显示 Not Found。
         const pairStatus = (msg.pair_status as string) ?? "";
-        if (pairStatus === "paired") {
+        safeLog(
+          `[web-remote-control] ${type} pair_status=${pairStatus || "n/a"} terminal_sid=${String(msg.terminal_sid ?? "")}`,
+        );
+        if (pairStatus === "paired" || pairStatus === "matched") {
           this.setState("paired");
         } else if (type === "auth_ack" || pairStatus === "waiting") {
           this.setState("waiting_terminal");
