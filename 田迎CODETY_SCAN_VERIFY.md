@@ -146,3 +146,27 @@ cp /tmp/terminal-sim.mjs . && node ./terminal-sim.mjs "<qrUrl>" [delayMs]
   备份在 `~/.zcode/v2/telemetry-state.json.bak-scan-test`，验证完恢复。
 - 打包命令同 田迎WEB_REMOTE_CONTROL.md §6（`--skip-prepare` 需要
   mock-cdn runtime assets 在位）。
+
+## Web 远程控制版本号纪律（2026-10-07 事故定案，禁止回退）
+
+症状：手机扫码配对成功、"同步工作区"后整页 404 "Not Found"。
+
+机制：
+1. SPA 配对成功后读取 bootstrap-response 的 `desktopAppVersion`，把页面 URL
+   的 `app_version` 改写成该值并刷新 —— 桌面版本号会"回灌"手机 URL。
+2. zcode.z.ai 对 `/remote/v4` 的 `app_version` 白名单只放行线上发布版本
+   （2026-10-07 实测仅 3.14.3/3.14.4；3.13.x 与一切自编版本号 → 404）。
+   白名单校验：`curl -s -o /dev/null -w '%{http_code}' 'https://zcode.z.ai/remote/v4?app_version=X'`
+3. relay 的 pair_status 实际值是 `matched`（非 `paired`），必须两个都接受。
+4. OpenCode 与 Codety 共享 deviceMid，两 app 同时开远控互踢（KICKED 循环），
+   同一时刻只保持一个在线。
+
+纪律：
+- `webRemoteControl.ts` 顶部 `RELAY_COMPAT_APP_VERSION` 是手机端版本号的
+  唯一来源，覆盖四个出口：QR URL、注册/认证 meta、persisted 恢复构造器、
+  bootstrap `desktopAppVersion`。本地 package.json 升版本（如 3.14.10）
+  时严禁把它"顺手统一"成 package.json 的值。
+- 换兼容版本前必须先 curl 确认在白名单内；曾因自编 3.14.5~3.14.9 连环
+  触发本问题，b3b8264 时代无症状只因 app 本就是官方 3.14.3。
+- 排障锚点：配对成功但"同步工作区"后 Not Found = 白名单违规；桌面实况看
+  `~/.zcode/v2/logs/` 的 `[wrc-diag]` 与 `pair_status` 日志。
