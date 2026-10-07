@@ -1024,3 +1024,31 @@ apps/zcode-cli adapters auth/cli 错误信息                   凭据/配置定
 
 - CLI 帮助文案中保留 "ZCode Protocol" 字样（协议真实名称；CLI 非桌面端主要界面）。
 - 登录浏览器地址栏会出现 `zcode://` 回调 scheme（改 scheme 牵动 OAuth 回调链路）。
+
+### 15.12 Web 远程控制版本号纪律（2026-10-07 事故定案）
+
+症状：手机扫码能配对、走到"同步工作区"，随后整页变 404 "Not Found"。
+
+机制（四层，层层独立即可致死）：
+1. **SPA 规范化**：手机 SPA 配对成功后，读取 bootstrap-response 的
+   `desktopAppVersion`，把页面 URL 的 `app_version` 改写成该值并刷新页面。
+   也就是说桌面 app 版本号会"回灌"到手机 URL。
+2. **服务端白名单**：zcode.z.ai 对 `/remote/v4` 的 `app_version` 只放行
+   线上发布过的版本（2026-10-07 实测仅 3.14.3 / 3.14.4；3.13.x 与任何自编
+   版本号一律 HTTP 404 纯文本 "Not Found"）。校验手段：
+   `curl -s -o /dev/null -w '%{http_code}' 'https://zcode.z.ai/remote/v4?app_version=X'`
+3. **pair_status 实际值是 `matched`**（非 `paired`），桌面必须两个值都接受。
+4. **同 deviceMid 冲突**：OpenCode 与 Codety 共享 telemetry deviceMid，两个
+   app 同时开远控会被 relay 互踢（KICKED 循环）。同一时刻只保持一个在线。
+
+纪律（改版本号前必读）：
+- `packages/desktop/src/main/webRemoteControl.ts` 顶部的
+  `RELAY_COMPAT_APP_VERSION` 是唯一对手机端上报版本号的地方，覆盖四个出口：
+  QR URL、device_register_init/auth_init meta、persisted 恢复构造器、
+  bootstrap `desktopAppVersion`。**本地 package.json 升版本时不要动它**，
+  也不要"顺手统一"成 package.json 的值。
+- 换兼容版本前必须先用第 2 条的 curl 确认新值在白名单内；白名单随线上
+  发布变化，旧值可能失效。
+- 禁止让 package.json 版本号流入任何远控对外载荷（含 UA 之外的一切）。
+- 排障锚点：配对成功但"同步工作区"后 Not Found = 白名单违规；
+  `~/.zcode/v2/logs/` 中 `[wrc-diag]`/`pair_status` 可看桌面侧实况。
