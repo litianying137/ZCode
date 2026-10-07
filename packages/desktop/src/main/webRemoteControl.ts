@@ -402,9 +402,9 @@ class RelayClient {
       );
       this.ws = null;
       this.clearTimers();
-      if (this.state !== "error") {
-        this.scheduleReconnect();
-      }
+      // 旧版语义：任何断开（含 KICKED / error 后的 close）都走重连；KICKED 是 relay
+      // 在 terminal 异常断开后踢设备重置会话，设备必须重连重新注册，不能停在 error。
+      this.scheduleReconnect();
     });
 
     ws.on("error", (err: Error) => {
@@ -464,6 +464,7 @@ class RelayClient {
             deviceName: this.options.deviceName,
             appVersion: RELAY_COMPAT_APP_VERSION,
           });
+          safeLog(`[web-remote-control] qr url: ${this.qrUrl}`);
           this.setState("authenticating");
           // 发 auth_init
           this.send({
@@ -642,6 +643,10 @@ class RelayClient {
       safeLog(`[web-remote-control] state ${this.state} -> ${next}`);
     }
     this.state = next;
+    // 进入 paired 时启动工作区列表推送（手机首页任务计数依赖该通道）
+    if (next === "paired") {
+      scheduleWorkspaceListPush();
+    }
     this.options.onStateChange({
       state: this.state,
       qrUrl: this.qrUrl,
