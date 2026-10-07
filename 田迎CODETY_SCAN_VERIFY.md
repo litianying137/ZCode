@@ -170,3 +170,28 @@ cp /tmp/terminal-sim.mjs . && node ./terminal-sim.mjs "<qrUrl>" [delayMs]
   触发本问题，b3b8264 时代无症状只因 app 本就是官方 3.14.3。
 - 排障锚点：配对成功但"同步工作区"后 Not Found = 白名单违规；桌面实况看
   `~/.zcode/v2/logs/` 的 `[wrc-diag]` 与 `pair_status` 日志。
+
+## 主进程 OOM crash 定案（2026-10-07，修复已随 opencode 同步回本分支）
+
+症状：一天两次 crash，签名一致——`EXC_BREAKPOINT (brk 0)`、主线程
+CrBrowserMain、node::InternalMakeCallback + JIT JS 帧。
+
+定位方法：`~/.zcode/v2/logs/YYYY-MM-DD.log` 的 `[memory] role=main` 行——
+crash 实例临终 heapUsedKb≈4062175（V8 4GB 上限），暴涨时点与手机建 bridge
+精确同步，arrayBuffersKb=0（纯 JS 字符串）。crash 报告只有 brk 0，V8
+FATAL 文案随 Finder 启动的 stderr 丢弃，`[memory]` 采样是唯一现场。
+
+根因：transport `flush()` 每条新消息全量重发未 ACK 队列 → N 条突发 O(N²)
+base64+JSON 帧字符串 → 主进程堆破 4GB。次因：分片二分探测临时串、手写
+逐字符 base64、outbound 无滞留上限、无发送背压、KICKED 后不销毁 bridge、
+safeLog 自递归吞掉全部日志（首次合并冲突丢失修复行所致）。
+
+修复（已在分支内）：flush 按 seq 只发一次+显式 replayUnacknowledged、
+64MB 滞留上限（retentionOverflow）、Buffer base64、解析式分片、
+8MB 背压丢帧、KICKED/AUTH_FAILED/停止 dispose bridge、发送 try/catch、
+safeLog 修复+接入文件日志、30s `[wrc-diag]` 观测、perMessageDeflate、
+超 1MiB 信封拒发、收端 30s 组装超时。
+
+纪律：重度使用后看最新 `[wrc-diag]`——retainedKB 不回落/dropped 增长/
+heapMB 单调爬升任一出现即停用回报；改远控代码必跑
+`node --test packages/desktop/test/web-remote-control-rpc-transport.test.ts`。
