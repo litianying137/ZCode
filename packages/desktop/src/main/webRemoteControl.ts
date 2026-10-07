@@ -884,7 +884,10 @@ function buildBootstrapResult(): Record<string, unknown> {
   // 首页每个工作区的任务计数即来自这里，而非 bridge 后的 RPC 通道。
   return {
     windowControlSessionId: client?.getStatus().deviceSid ?? "unknown",
-    desktopAppVersion: ZCODE_VERSION,
+    // SPA 配对后会拿这个值把页面 URL 的 app_version 规范化成桌面版本再刷新
+    // （刷新走服务端白名单）。上报自编版本号会让手机在"同步工作区"后 404
+    // Not Found——必须与 QR/meta 一致上报白名单内的兼容版本。
+    desktopAppVersion: RELAY_COMPAT_APP_VERSION,
     workspaces: getWorkspaces(),
     tasks: getTasks(),
   };
