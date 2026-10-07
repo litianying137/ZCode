@@ -377,7 +377,7 @@ class RelayClient {
         const msg = JSON.parse(data.toString("utf-8"));
         const raw = JSON.stringify(msg);
         safeLog(
-          `[web-remote-control] recv type=${msg.type}${msg.type === "error" || msg.type === "auth_ack" ? ` body=${raw.slice(0, 500)}` : ""}`,
+          `[web-remote-control] recv type=${msg.type}${msg.type === "error" || msg.type === "auth_ack" || msg.type === "pair_status_ack" ? ` body=${raw.slice(0, 500)}` : ""}`,
         );
         this.handleMessage(msg);
       } catch {
@@ -489,9 +489,13 @@ class RelayClient {
       }
       case "auth_ack":
       case "pair_status_ack": {
-        // 旧版实测 pair_status 值为 "waiting"（等手机扫码）或 "matched"（已有手机配对）。
+        // relay 实际会返回 matched（官方线上 app 也兼容 paired）；waiting 表示
+        // 设备已认证、仍等手机扫码。
         const pairStatus = (msg.pair_status as string) ?? "";
-        if (pairStatus === "matched") {
+        safeLog(
+          `[web-remote-control] ${type} pair_status=${pairStatus || "n/a"} terminal_sid=${String(msg.terminal_sid ?? "")}`,
+        );
+        if (pairStatus === "paired" || pairStatus === "matched") {
           this.setState("paired");
         } else if (type === "auth_ack" || pairStatus === "waiting") {
           this.setState("waiting_terminal");
