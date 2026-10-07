@@ -22,7 +22,7 @@ import {
 import { HostMessageTypes } from "@zcode/shared";
 import { WebSocket } from "ws";
 import { DEFAULT_ZCODE_ENDPOINT_ORIGIN, ZCODE_VERSION } from "@zcode/shared";
-import { WebRemoteControlRpcTransport } from "./webRemoteControlRpcTransport.js";
+import { SHARED_MAX_FRAME_BYTES, WebRemoteControlRpcTransport } from "./webRemoteControlRpcTransport.js";
 import { logger } from "./logger.js";
 import {
   getTasks,
@@ -237,6 +237,7 @@ class RelayClient {
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private lastPairStatusAckAt = 0;
   private lastBackpressureLogAt = 0;
+  private lastOversizeLogAt = 0;
   private disposed = false;
 
   constructor(private options: RelayClientOptions) {
@@ -321,8 +322,10 @@ class RelayClient {
     // 旧版 external relay device 必须带 X-Device-ID；relay 用这个 header 将 device
     // socket 与 terminal URL 的 mid 配对。缺失时两边都能 auth，但 pair_status 永远 waiting，
     // 约 180s 后 device 被 KICKED——正是 WiFi/4G 均无法撮合的根因。
+    // perMessageDeflate 对齐官方设备端（帧是 base64 文本，压缩收益明显）。
     const ws = new WebSocket(this.options.relayWsUrl, {
       headers: { "X-Device-ID": this.options.deviceMid },
+      perMessageDeflate: true,
     });
     this.ws = ws;
 
@@ -575,23 +578,47 @@ class RelayClient {
 
   /** 向 relay 发送任意 data 帧（设备→手机）。 */
   sendPayload(payload: Record<string, unknown>): void {
-    const ready = this.ws?.readyState === WebSocket.OPEN;
+    // 对齐官方 payloadSerializer：序列化一次 + 复用，超限（>1MiB 帧）直接拒发。
+    const envelope = { type: "data" as const, payload, client_ts: Date.now() };
+    let json: string;
+    try {
+      json = JSON.stringify(envelope);
+    } catch (err) {
+      safeLog(
+        `[web-remote-control] send serialize failed zcode_type=${String(payload.zcode_type)} error=${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+    const bytes = Buffer.byteLength(json, "utf8");
+    if (bytes > SHARED_MAX_FRAME_BYTES) {
+      const now = Date.now();
+      if (now - this.lastOversizeLogAt > 5_000) {
+        this.lastOversizeLogAt = now;
+        safeLog(
+          `[web-remote-control] send oversize drop zcode_type=${String(payload.zcode_type)} bytes=${bytes} max=${SHARED_MAX_FRAME_BYTES}`,
+        );
+      }
+      return;
+    }
+    const ws = this.ws;
+    const ready = ws?.readyState === WebSocket.OPEN;
+    if (!ws || !ready) return;
     // 背压保护：手机侧停止消费（关页面/弱网/后台）时 relay 会把未读数据顶回
     // 本地发送缓冲。继续狂发只会撑爆主进程，丢帧让手机端刷新重取更安全。
-    if (ready && this.ws && this.ws.bufferedAmount > SEND_BACKPRESSURE_BYTES) {
+    if (ws.bufferedAmount > SEND_BACKPRESSURE_BYTES) {
       const now = Date.now();
       if (now - this.lastBackpressureLogAt > 5_000) {
         this.lastBackpressureLogAt = now;
         safeLog(
-          `[web-remote-control] send backpressure drop zcode_type=${String(payload.zcode_type)} buffered=${this.ws.bufferedAmount}`,
+          `[web-remote-control] send backpressure drop zcode_type=${String(payload.zcode_type)} buffered=${ws.bufferedAmount}`,
         );
       }
       return;
     }
     safeLog(
-      `[web-remote-control] send data zcode_type=${String(payload.zcode_type)} requestId=${String(payload.requestId ?? "")} state=${this.state} wsOpen=${ready}`,
+      `[web-remote-control] send data zcode_type=${String(payload.zcode_type)} requestId=${String(payload.requestId ?? "")} state=${this.state} bytes=${bytes}`,
     );
-    this.send({ type: "data", payload, client_ts: Date.now() });
+    ws.send(json);
   }
 
   /** 发送缓冲区未冲刷字节数（诊断用；手机停止消费时会持续上涨）。 */
@@ -870,6 +897,9 @@ async function handleWorkspaceBridgeOpen(payload: Record<string, unknown>): Prom
   const transport = new WebRemoteControlRpcTransport({
     bridgeSessionId,
     bridgeGeneration,
+    // sendPayload 侧超限拒发按整个 relay 信封算 1MiB，帧本体预算留出信封余量，
+    // 否则贴着上限造出的帧会在发送口被误杀。
+    maxFrameBytes: SHARED_MAX_FRAME_BYTES - 512,
     sendFrame: (frame) => client?.sendPayload(frame as unknown as Record<string, unknown>),
     onMessage: (bytes) => {
       const bridge = activeBridge;

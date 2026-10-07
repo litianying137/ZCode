@@ -7,7 +7,14 @@
 
 export const SHARED_MAX_FRAME_BYTES = 1024 * 1024;
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
+// 发送侧上限（官方哲学：桌面端从不产生大消息——快照 60 行尾窗/范围 200 行/
+// 工具输出截断都在源头限流，合法消息远小于此）。收到超限发送即说明上游
+// 数据量失控，宁可拒发留日志也不分片硬推。
+const MAX_SEND_MESSAGE_BYTES = 8 * 1024 * 1024;
 const MAX_FRAGMENTS = 64;
+// 收端组装超时，对齐官方 logicalFrameAssemblyTimeoutMs：不完整分片组 30s
+// 后丢弃并报 fault，防止半成品长期滞留。
+const ASSEMBLY_TIMEOUT_MS = 30_000;
 // 未 ACK 消息的重发保留上限。超出后丢弃最老批次（只影响断线重放，不影响
 // 在线投递）。此前无上限：手机停止 ACK（关页面/弱网）时 outbound 无限滞留，
 // 主进程堆被 base64/JSON 帧字符串撑爆（2026-10-07 两次 V8 4GB OOM crash）。
@@ -62,7 +69,9 @@ export interface RpcTransportFault {
     | "lengthMismatch"
     | "futureAck"
     | "conflictingDuplicate"
-    | "retentionOverflow";
+    | "retentionOverflow"
+    | "assemblyTimeout"
+    | "sendLimitExceeded";
   seq?: number;
   messageSeq?: number;
 }
@@ -139,7 +148,12 @@ export class WebRemoteControlRpcTransport {
   private expectedPhysicalSeq: number;
   private expectedMessageSeq: number;
   private lastAckedMessageSeq = 0;
-  private active: { frame: RpcFrame; parts: Uint8Array[]; fingerprints: string[] } | null = null;
+  private active: {
+    frame: RpcFrame;
+    firstSeenAt: number;
+    parts: Uint8Array[];
+    fingerprints: string[];
+  } | null = null;
   private outbound: Array<{ messageSeq: number; totalBytes: number; frames: RpcFrame[] }> = [];
   private settledBySeq = new Map<number, string>();
   private disposed = false;
@@ -192,6 +206,12 @@ export class WebRemoteControlRpcTransport {
       message.length > MAX_MESSAGE_BYTES
     )
       throw new Error("invalid RPC message");
+    if (message.length > MAX_SEND_MESSAGE_BYTES) {
+      this.report({ reason: "sendLimitExceeded", messageSeq: this.nextMessageSeq });
+      throw new Error(
+        `RPC message exceeds send limit: ${message.length} > ${MAX_SEND_MESSAGE_BYTES}`,
+      );
+    }
     const checksum = { algorithm: "crc32" as const, value: crc32Hex(message) };
     const fragmentCount = Math.max(
       1,
@@ -251,7 +271,21 @@ export class WebRemoteControlRpcTransport {
     if (!sameIdentity(this.identity, value)) return this.report({ reason: "identityMismatch" });
     if (value.zcode_type === "rpc-frame-ack") return this.acceptAck(value.ackMessageSeq);
     if (value.zcode_type !== "rpc-frame") return this.report({ reason: "invalidFrame" });
+    this.expireAssemblies();
     return this.acceptFrame(value as RpcFrame);
+  }
+
+  /** 丢弃超过组装超时的半成品分片组（官方 logicalFrameAssemblyTimeoutMs 语义）。 */
+  expireAssemblies(now: number = Date.now()): void {
+    if (!this.active) return;
+    if (now - this.active.firstSeenAt <= ASSEMBLY_TIMEOUT_MS) return;
+    const stalled = this.active;
+    this.active = null;
+    this.report({
+      reason: "assemblyTimeout",
+      seq: stalled.frame.seq,
+      messageSeq: stalled.frame.messageSeq,
+    });
   }
 
   dispose(): void {
@@ -372,7 +406,7 @@ export class WebRemoteControlRpcTransport {
       });
     if (this.active && frame.fragmentIndex !== this.active.parts.length)
       return this.report({ reason: "fragmentGap", seq: frame.seq, messageSeq: frame.messageSeq });
-    this.active ??= { frame, parts: [], fingerprints: [] };
+    this.active ??= { frame, firstSeenAt: Date.now(), parts: [], fingerprints: [] };
     this.active.parts.push(bytes);
     this.active.fingerprints.push(fingerprint);
     this.settledBySeq.set(frame.seq, fingerprint);

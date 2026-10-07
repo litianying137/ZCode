@@ -201,3 +201,40 @@ test("base64 helpers are Buffer-equivalent", () => {
     assert.equal(encodeBase64(bytes), Buffer.from(bytes).toString("base64"));
   }
 });
+
+test("expires stalled inbound assemblies after the 30s window", () => {
+  const emitted: RpcPayload[] = [];
+  const faults: Array<{ reason: string }> = [];
+  const sender = new WebRemoteControlRpcTransport({
+    ...identity,
+    maxFrameBytes: 512,
+    sendFrame: (frame) => emitted.push(frame),
+    onMessage: () => undefined,
+  });
+  const receiver = new WebRemoteControlRpcTransport({
+    ...identity,
+    maxFrameBytes: 512,
+    sendFrame: () => undefined,
+    onMessage: () => undefined,
+    onFault: (fault) => faults.push(fault),
+  });
+  sender.send(new Uint8Array(500)); // 多分片消息
+  const frames = emitted.filter((payload): payload is RpcFrame => payload.zcode_type === "rpc-frame");
+  assert.ok(frames.length >= 2);
+  // 只投递第一个分片，然后时间前进 31s → 半成品应被丢弃并报 assemblyTimeout。
+  assert.equal(receiver.acceptPayload(frames[0]), true);
+  receiver.expireAssemblies(Date.now() + 31_000);
+  assert.ok(faults.some((fault) => fault.reason === "assemblyTimeout"));
+});
+
+test("rejects outbound messages beyond the send limit", () => {
+  const faults: Array<{ reason: string }> = [];
+  const transport = new WebRemoteControlRpcTransport({
+    ...identity,
+    sendFrame: () => undefined,
+    onMessage: () => undefined,
+    onFault: (fault) => faults.push(fault),
+  });
+  assert.throws(() => transport.send(new Uint8Array(8 * 1024 * 1024 + 1)));
+  assert.ok(faults.some((fault) => fault.reason === "sendLimitExceeded"));
+});
