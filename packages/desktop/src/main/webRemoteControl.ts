@@ -256,14 +256,15 @@ class RelayClient {
       this.passHash = persisted.passHash;
       this.deviceSid = persisted.deviceSid;
       // persisted 恢复不走 device_register_ack，二维码在构造时直接按存储身份构建；
-      // 同一 sid+hash 意味着重启后旧二维码依然有效。
+      // 同一 sid+hash 意味着重启后旧二维码依然有效。app_version 必须同样上报
+      // 服务端白名单放行的兼容版本，否则重启一次 QR 就退回本地版本号 → 手机 404。
       this.qrUrl = buildQrUrl({
         baseUrl: resolveMobileUrl(options.endpointOrigin),
         deviceSid: persisted.deviceSid,
         passHash: persisted.passHash,
         deviceMid: options.deviceMid,
         deviceName: options.deviceName,
-        appVersion: options.appVersion,
+        appVersion: RELAY_COMPAT_APP_VERSION,
       });
       safeLog(`[web-remote-control] using persisted device identity sid=${persisted.deviceSid}`);
     } else {
