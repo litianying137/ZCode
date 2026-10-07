@@ -103,6 +103,15 @@ function resolveDeviceName(): string {
 const RELAY_WS_DEFAULT = "wss://zcode.z.ai/ws";
 const MOBILE_URL_DEFAULT = "https://zcode.z.ai/remote/v4";
 
+// QR URL 与设备注册/认证 meta 里的 app_version 受 zcode.z.ai 服务端校验：
+// 1) 页面路由对 app_version 白名单校验，只放行线上已发布版本（2026-10-07
+//    实测仅 3.14.3/3.14.4，其余含更新编号一律 404 "Not Found"）；
+// 2) SPA 加载后还会按 sid 从 relay 读取设备注册时上报的 meta.version 规范化
+//    URL 再刷新——注册报 3.14.6 时，即使 QR 写 3.14.3 也会被改回 3.14.6 后 404。
+// 因此两处统一上报我们实际基于的上游基线版本；本地 package.json 版本号仅供
+// crash 报告区分构建，与此解耦。
+const RELAY_COMPAT_APP_VERSION = "3.14.3";
+
 function resolveRelayWsUrl(_endpointOrigin: string, deviceMid?: string): string {
   const override = process.env.ZCODE_WEB_REMOTE_CONTROL_RELAY_WS_URL?.trim();
   const base = override || RELAY_WS_DEFAULT;
@@ -360,7 +369,7 @@ class RelayClient {
         pass_hash: this.passHash,
         meta: {
           platform: process.platform,
-          version: this.options.appVersion,
+          version: RELAY_COMPAT_APP_VERSION,
           name: this.options.deviceName,
         },
         client_ts: Date.now(),
@@ -429,7 +438,7 @@ class RelayClient {
       device_sid: deviceSid,
       meta: {
         platform: process.platform,
-        version: this.options.appVersion,
+        version: RELAY_COMPAT_APP_VERSION,
         name: this.options.deviceName,
       },
       client_ts: Date.now(),
@@ -445,14 +454,14 @@ class RelayClient {
           // persisted：注册成功即落盘，重启后复用同一身份（旧版 onRegisteredAuth）。
           savePersistedRelayAuth({ deviceSid: this.deviceSid, passHash: this.passHash });
           this.authMode = "persisted";
-          // 构建 QR URL
+          // 构建 QR URL（app_version 用服务端白名单放行的上游基线版本）
           this.qrUrl = buildQrUrl({
             baseUrl: resolveMobileUrl(this.options.endpointOrigin),
             deviceSid: this.deviceSid,
             passHash: this.passHash,
             deviceMid: this.options.deviceMid,
             deviceName: this.options.deviceName,
-            appVersion: this.options.appVersion,
+            appVersion: RELAY_COMPAT_APP_VERSION,
           });
           this.setState("authenticating");
           // 发 auth_init
@@ -462,7 +471,7 @@ class RelayClient {
             device_sid: this.deviceSid,
             meta: {
               platform: process.platform,
-              version: this.options.appVersion,
+              version: RELAY_COMPAT_APP_VERSION,
               name: this.options.deviceName,
             },
             client_ts: Date.now(),
