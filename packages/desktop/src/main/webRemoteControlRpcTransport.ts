@@ -8,6 +8,10 @@
 export const SHARED_MAX_FRAME_BYTES = 1024 * 1024;
 const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const MAX_FRAGMENTS = 64;
+// 未 ACK 消息的重发保留上限。超出后丢弃最老批次（只影响断线重放，不影响
+// 在线投递）。此前无上限：手机停止 ACK（关页面/弱网）时 outbound 无限滞留，
+// 主进程堆被 base64/JSON 帧字符串撑爆（2026-10-07 两次 V8 4GB OOM crash）。
+const DEFAULT_MAX_RETAINED_BYTES = 64 * 1024 * 1024;
 
 export interface RpcIdentity {
   bridgeSessionId: string;
@@ -40,6 +44,7 @@ export interface WebRemoteControlRpcTransportOptions extends RpcIdentity {
   sendFrame: (payload: RpcPayload) => void;
   onMessage: (message: Uint8Array, messageSeq: number) => void;
   maxFrameBytes?: number;
+  maxRetainedBytes?: number;
   initialPhysicalSeq?: number;
   initialMessageSeq?: number;
   onFault?: (fault: RpcTransportFault) => void;
@@ -56,12 +61,22 @@ export interface RpcTransportFault {
     | "metadataMismatch"
     | "lengthMismatch"
     | "futureAck"
-    | "conflictingDuplicate";
+    | "conflictingDuplicate"
+    | "retentionOverflow";
   seq?: number;
   messageSeq?: number;
 }
 
-const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+export interface RpcTransportStats {
+  outboundBatches: number;
+  retainedBytes: number;
+  lastAckedMessageSeq: number;
+  nextMessageSeq: number;
+  sentFrameCount: number;
+  replayedFrameCount: number;
+  droppedBatches: number;
+  disposed: boolean;
+}
 
 export function crc32Hex(bytes: Uint8Array): string {
   let crc = 0xffffffff;
@@ -73,20 +88,9 @@ export function crc32Hex(bytes: Uint8Array): string {
 }
 
 export function encodeBase64(bytes: Uint8Array): string {
-  let result = "";
-  for (let i = 0; i < bytes.length; i += 3) {
-    const a = bytes[i] ?? 0;
-    const hasB = i + 1 < bytes.length;
-    const hasC = i + 2 < bytes.length;
-    const b = hasB ? bytes[i + 1]! : 0;
-    const c = hasC ? bytes[i + 2]! : 0;
-    const value = (a << 16) | (b << 8) | c;
-    result += BASE64_ALPHABET[value >>> 18];
-    result += BASE64_ALPHABET[(value >>> 12) & 63];
-    result += hasB ? BASE64_ALPHABET[(value >>> 6) & 63] : "=";
-    result += hasC ? BASE64_ALPHABET[value & 63] : "=";
-  }
-  return result;
+  // Buffer 原生实现：单次分配。逐字符拼接版本对 1MiB 级分片是分配风暴，
+  // 是主进程堆暴涨（V8 OOM）的贡献因素之一。
+  return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("base64");
 }
 
 function decodeBase64(value: unknown): Uint8Array | null {
@@ -97,20 +101,7 @@ function decodeBase64(value: unknown): Uint8Array | null {
     !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)
   )
     return null;
-  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
-  const result = new Uint8Array((value.length / 4) * 3 - padding);
-  let offset = 0;
-  for (let i = 0; i < value.length; i += 4) {
-    const a = BASE64_ALPHABET.indexOf(value[i]!);
-    const b = BASE64_ALPHABET.indexOf(value[i + 1]!);
-    const c = value[i + 2] === "=" ? 0 : BASE64_ALPHABET.indexOf(value[i + 2]!);
-    const d = value[i + 3] === "=" ? 0 : BASE64_ALPHABET.indexOf(value[i + 3]!);
-    const bits = (a << 18) | (b << 12) | (c << 6) | d;
-    if (offset < result.length) result[offset++] = bits >>> 16;
-    if (offset < result.length) result[offset++] = (bits >>> 8) & 255;
-    if (offset < result.length) result[offset++] = bits & 255;
-  }
-  return result;
+  return new Uint8Array(Buffer.from(value, "base64"));
 }
 
 function sameIdentity(expected: RpcIdentity, actual: Partial<RpcIdentity>): boolean {
@@ -149,9 +140,16 @@ export class WebRemoteControlRpcTransport {
   private expectedMessageSeq: number;
   private lastAckedMessageSeq = 0;
   private active: { frame: RpcFrame; parts: Uint8Array[]; fingerprints: string[] } | null = null;
-  private outbound: Array<{ messageSeq: number; frames: RpcFrame[] }> = [];
+  private outbound: Array<{ messageSeq: number; totalBytes: number; frames: RpcFrame[] }> = [];
   private settledBySeq = new Map<number, string>();
   private disposed = false;
+  private readonly maxRetainedBytes: number;
+  private outboundRetainedBytes = 0;
+  private lastSentPhysicalSeq = 0;
+  private sentFrameCount = 0;
+  private replayedFrameCount = 0;
+  private droppedBatches = 0;
+  private headerJsonBytes: number | null = null;
 
   constructor(options: WebRemoteControlRpcTransportOptions) {
     if (
@@ -171,6 +169,9 @@ export class WebRemoteControlRpcTransport {
     this.deliver = options.onMessage;
     this.onFault = options.onFault;
     this.maxFrameBytes = options.maxFrameBytes ?? SHARED_MAX_FRAME_BYTES;
+    this.maxRetainedBytes = options.maxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES;
+    if (!Number.isSafeInteger(this.maxRetainedBytes) || this.maxRetainedBytes < 1024)
+      throw new Error("invalid maxRetainedBytes");
     if (
       !Number.isSafeInteger(this.maxFrameBytes) ||
       this.maxFrameBytes < 64 ||
@@ -218,14 +219,30 @@ export class WebRemoteControlRpcTransport {
         dataBase64: encodeBase64(part),
       });
     }
-    this.outbound.push({ messageSeq, frames });
+    this.outbound.push({ messageSeq, totalBytes: message.length, frames });
+    this.outboundRetainedBytes += message.length;
+    this.enforceRetentionCap();
     this.flush();
   }
 
   replayUnacknowledged(): boolean {
     if (this.disposed) return false;
-    this.flush();
+    this.lastSentPhysicalSeq = 0;
+    this.flush(true);
     return true;
+  }
+
+  stats(): RpcTransportStats {
+    return {
+      outboundBatches: this.outbound.length,
+      retainedBytes: this.outboundRetainedBytes,
+      lastAckedMessageSeq: this.lastAckedMessageSeq,
+      nextMessageSeq: this.nextMessageSeq,
+      sentFrameCount: this.sentFrameCount,
+      replayedFrameCount: this.replayedFrameCount,
+      droppedBatches: this.droppedBatches,
+      disposed: this.disposed,
+    };
   }
 
   acceptPayload(payload: unknown): boolean {
@@ -240,33 +257,56 @@ export class WebRemoteControlRpcTransport {
   dispose(): void {
     this.disposed = true;
     this.outbound = [];
+    this.outboundRetainedBytes = 0;
     this.active = null;
   }
 
   private fragmentBytes(messageBytes: number, checksum: RpcFrame["checksum"]): number {
-    let low = 1;
-    let high = messageBytes;
-    while (low < high) {
-      const mid = Math.ceil((low + high) / 2);
-      const probe: RpcFrame = {
-        zcode_type: "rpc-frame",
-        ...this.identity,
-        seq: this.nextPhysicalSeq,
-        messageSeq: this.nextMessageSeq,
-        fragmentIndex: 0,
-        fragmentCount: Math.ceil(messageBytes / mid),
-        messageBytes,
-        checksum,
-        dataBase64: "A".repeat(4 * Math.ceil(mid / 3)),
-      };
-      if (new TextEncoder().encode(JSON.stringify(probe)).length <= this.maxFrameBytes) low = mid;
-      else high = mid - 1;
-    }
-    return low;
+    // 帧 JSON = 固定头（identity/seq 等字段，按当前 identity 实测一次）+
+    // dataBase64（4*ceil(b/3)）。解析式求解，替代旧版二分探测——探测每次
+    // JSON.stringify ~1.4MB 字符串 ×20 轮，大消息时是纯粹的分配风暴。
+    this.headerJsonBytes ??=
+      new TextEncoder().encode(
+        JSON.stringify({
+          zcode_type: "rpc-frame",
+          ...this.identity,
+          seq: 0,
+          messageSeq: 0,
+          fragmentIndex: 0,
+          fragmentCount: 0,
+          messageBytes,
+          checksum,
+          dataBase64: "",
+        }),
+      ).length + 24; /* seq/messageSeq 位数增长余量 */
+    const budget = this.maxFrameBytes - this.headerJsonBytes;
+    if (budget < 4) return 1;
+    return Math.max(1, Math.floor((budget * 3) / 4));
   }
 
-  private flush(): void {
-    for (const batch of this.outbound) for (const frame of batch.frames) this.sendFrame(frame);
+  private enforceRetentionCap(): void {
+    while (this.outboundRetainedBytes > this.maxRetainedBytes && this.outbound.length > 1) {
+      const oldest = this.outbound.shift();
+      if (!oldest) break;
+      this.outboundRetainedBytes -= oldest.totalBytes;
+      this.droppedBatches += 1;
+      this.report({ reason: "retentionOverflow", messageSeq: oldest.messageSeq });
+    }
+  }
+
+  private flush(isReplay = false): void {
+    // 只发送从未发过的帧（seq 单调递增）。旧版每条新消息都全量重发未 ACK
+    // 队列：N 条消息的突发产生 O(N²) 次帧序列化，配合 V8 惰性 GC 直接把
+    // 主进程堆推过 4GB 上限。重放语义由 replayUnacknowledged() 显式触发。
+    for (const batch of this.outbound) {
+      for (const frame of batch.frames) {
+        if (frame.seq <= this.lastSentPhysicalSeq) continue;
+        this.lastSentPhysicalSeq = frame.seq;
+        if (isReplay) this.replayedFrameCount += 1;
+        else this.sentFrameCount += 1;
+        this.sendFrame(frame);
+      }
+    }
   }
 
   private acceptAck(value: unknown): boolean {
@@ -275,7 +315,11 @@ export class WebRemoteControlRpcTransport {
     const highestSent = this.outbound.at(-1)?.messageSeq ?? this.lastAckedMessageSeq;
     if (value > highestSent) return this.report({ reason: "futureAck", messageSeq: value });
     this.lastAckedMessageSeq = value;
-    this.outbound = this.outbound.filter((batch) => batch.messageSeq > value);
+    this.outbound = this.outbound.filter((batch) => {
+      if (batch.messageSeq > value) return true;
+      this.outboundRetainedBytes -= batch.totalBytes;
+      return false;
+    });
     return true;
   }
 
