@@ -3,6 +3,8 @@ import { test } from "node:test";
 import {
   WebRemoteControlRpcTransport,
   crc32Hex,
+  encodeBase64,
+  type RpcFrame,
   type RpcPayload,
 } from "../src/main/webRemoteControlRpcTransport.ts";
 
@@ -147,4 +149,55 @@ test("accepts exact duplicates once and rejects conflicting duplicates", () => {
   assert.equal(received.length, 1);
   assert.equal(receiver.acceptPayload({ ...frame, dataBase64: "BAUA" }), false);
   assert.equal(faults.at(-1)?.reason, "conflictingDuplicate");
+});
+
+test("send flushes each frame exactly once while unacked (no quadratic resend)", () => {
+  const sent: RpcPayload[] = [];
+  const transport = new WebRemoteControlRpcTransport({
+    ...identity,
+    maxFrameBytes: 512,
+    sendFrame: (frame) => sent.push(frame),
+    onMessage: () => undefined,
+  });
+  // 三条多分片消息连续发送（模拟手机打开工作区时 host 的突发响应流）。
+  // 旧实现每条新消息都会全量重发未 ACK 队列 —— N 条消息 O(N²) 帧序列化，
+  // 是 2026-10-07 主进程 V8 4GB OOM 的主要放大器。
+  transport.send(new Uint8Array(500));
+  transport.send(new Uint8Array(500));
+  transport.send(new Uint8Array(500));
+  const frames = sent.filter((payload): payload is RpcFrame => payload.zcode_type === "rpc-frame");
+  const seqs = frames.map((frame) => frame.seq);
+  assert.equal(new Set(seqs).size, seqs.length, "每个物理 seq 只应发送一次");
+  const stats = transport.stats();
+  assert.equal(stats.sentFrameCount, frames.length);
+  assert.equal(stats.replayedFrameCount, 0);
+  // 显式重放才允许重发。
+  assert.equal(transport.replayUnacknowledged(), true);
+  const afterReplay = sent.filter((p) => p.zcode_type === "rpc-frame");
+  assert.equal(afterReplay.length, frames.length * 2);
+});
+
+test("retention cap evicts oldest unacked batches and reports fault", () => {
+  const faults: Array<{ reason: string; messageSeq?: number }> = [];
+  const transport = new WebRemoteControlRpcTransport({
+    ...identity,
+    maxRetainedBytes: 2048,
+    sendFrame: () => undefined,
+    onMessage: () => undefined,
+    onFault: (fault) => faults.push(fault),
+  });
+  for (let index = 0; index < 6; index += 1) {
+    transport.send(new Uint8Array(1024).fill(index));
+  }
+  const stats = transport.stats();
+  assert.ok(stats.retainedBytes <= 2048 + 1024, `retained=${stats.retainedBytes}`);
+  assert.ok(stats.droppedBatches >= 1);
+  assert.ok(faults.some((fault) => fault.reason === "retentionOverflow"));
+});
+
+test("base64 helpers are Buffer-equivalent", () => {
+  for (const size of [0, 1, 2, 3, 255, 4096]) {
+    const bytes = new Uint8Array(size).map((_, index) => (index * 31 + size) % 256);
+    assert.equal(encodeBase64(bytes), Buffer.from(bytes).toString("base64"));
+  }
 });

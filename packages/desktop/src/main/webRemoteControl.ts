@@ -23,6 +23,7 @@ import { HostMessageTypes } from "@zcode/shared";
 import { WebSocket } from "ws";
 import { DEFAULT_ZCODE_ENDPOINT_ORIGIN, ZCODE_VERSION } from "@zcode/shared";
 import { WebRemoteControlRpcTransport } from "./webRemoteControlRpcTransport.js";
+import { logger } from "./logger.js";
 import {
   getTasks,
   getWorkspaces,
@@ -33,11 +34,18 @@ export { setWebRemoteControlWorkspaceResolver };
 
 // stdout 管道断开（终端关闭/Ctrl+C 后进程仍在）时 console.log 会抛 EIO 导致
 // uncaught exception 弹窗；所有诊断日志必须走安全输出。
+// 2026-10-07 勘误：此函数曾误写成自递归（栈溢出被自身 catch 吞掉），导致
+// 全部远控日志静默丢失、两次 V8 OOM crash 时无任何协议级现场。
 function safeLog(message: string): void {
   try {
-    safeLog(message);
+    console.log(message);
   } catch {
     // swallow EIO/EPIPE
+  }
+  try {
+    logger.info(message);
+  } catch {
+    // logger 内部已吞写盘错误，这里防御 EIO 类异常
   }
 }
 
@@ -208,6 +216,9 @@ interface RelayClientOptions {
   onStateChange: (status: RelayStatus) => void;
 }
 
+// relay WS 发送背压阈值：超过即丢弃后续 data 帧等手机端刷新重取。
+const SEND_BACKPRESSURE_BYTES = 8 * 1024 * 1024;
+
 class RelayClient {
   private ws: WebSocket | null = null;
   private state: RelayState = "idle";
@@ -225,6 +236,7 @@ class RelayClient {
   // pair_status_ack；超过 watchdog 窗口没收到 ack 视为连接僵死，重连。
   private heartbeatTimer: NodeJS.Timeout | null = null;
   private lastPairStatusAckAt = 0;
+  private lastBackpressureLogAt = 0;
   private disposed = false;
 
   constructor(private options: RelayClientOptions) {
@@ -520,6 +532,7 @@ class RelayClient {
           safeLog(
             "[web-remote-control] kicked by relay (session conflict), reconnecting with same identity",
           );
+          disposeActiveBridge();
           this.ws?.close();
           return;
         }
@@ -536,6 +549,7 @@ class RelayClient {
           this.deviceSid = null;
           this.qrUrl = null;
           safeLog("[web-remote-control] persisted auth rejected, falling back to fresh register");
+          disposeActiveBridge();
           this.ws?.close();
           this.scheduleReconnectNow();
           return;
@@ -559,10 +573,27 @@ class RelayClient {
   /** 向 relay 发送任意 data 帧（设备→手机）。 */
   sendPayload(payload: Record<string, unknown>): void {
     const ready = this.ws?.readyState === WebSocket.OPEN;
+    // 背压保护：手机侧停止消费（关页面/弱网/后台）时 relay 会把未读数据顶回
+    // 本地发送缓冲。继续狂发只会撑爆主进程，丢帧让手机端刷新重取更安全。
+    if (ready && this.ws && this.ws.bufferedAmount > SEND_BACKPRESSURE_BYTES) {
+      const now = Date.now();
+      if (now - this.lastBackpressureLogAt > 5_000) {
+        this.lastBackpressureLogAt = now;
+        safeLog(
+          `[web-remote-control] send backpressure drop zcode_type=${String(payload.zcode_type)} buffered=${this.ws.bufferedAmount}`,
+        );
+      }
+      return;
+    }
     safeLog(
       `[web-remote-control] send data zcode_type=${String(payload.zcode_type)} requestId=${String(payload.requestId ?? "")} state=${this.state} wsOpen=${ready}`,
     );
     this.send({ type: "data", payload, client_ts: Date.now() });
+  }
+
+  /** 发送缓冲区未冲刷字节数（诊断用；手机停止消费时会持续上涨）。 */
+  getSendBufferedAmount(): number {
+    return this.ws?.bufferedAmount ?? 0;
   }
 
   private setState(next: RelayState): void {
@@ -606,6 +637,13 @@ export function setWebRemoteControlHostProcessResolver(
 }
 
 function disposeActiveBridge(): void {
+  if (activeBridge) {
+    const stats = activeBridge.transport.stats();
+    safeLog(
+      `[web-remote-control] bridge disposed sid=${activeBridge.bridgeSessionId.slice(0, 8)} batches=${stats.outboundBatches} retainedKB=${Math.round(stats.retainedBytes / 1024)} acked=${stats.lastAckedMessageSeq}/${stats.nextMessageSeq - 1} sentFrames=${stats.sentFrameCount} replayed=${stats.replayedFrameCount} dropped=${stats.droppedBatches}`,
+    );
+  }
+  stopBridgeDiagnostics();
   if (!activeBridge) return;
   activeBridge.transport.dispose();
   try {
@@ -614,6 +652,33 @@ function disposeActiveBridge(): void {
     // best effort
   }
   activeBridge = null;
+}
+
+// ── bridge 内存诊断：30s 一条结构化日志，crash/泄漏事后可溯 ──
+// 2026-10-07 两次 V8 4GB OOM 后加：定位时对照 retainedKB/acked/dropped/heap 走势。
+let bridgeDiagTimer: NodeJS.Timeout | null = null;
+
+function startBridgeDiagnostics(bridgeSessionId: string): void {
+  stopBridgeDiagnostics();
+  bridgeDiagTimer = setInterval(() => {
+    const bridge = activeBridge;
+    if (!bridge) {
+      stopBridgeDiagnostics();
+      return;
+    }
+    const stats = bridge.transport.stats();
+    const heap = process.memoryUsage();
+    safeLog(
+      `[wrc-diag] bridge=${bridgeSessionId.slice(0, 8)} batches=${stats.outboundBatches} retainedKB=${Math.round(stats.retainedBytes / 1024)} acked=${stats.lastAckedMessageSeq}/${stats.nextMessageSeq - 1} sentFrames=${stats.sentFrameCount} replayed=${stats.replayedFrameCount} dropped=${stats.droppedBatches} wsBufferedKB=${Math.round((client?.getSendBufferedAmount() ?? 0) / 1024)} heapMB=${Math.round(heap.heapUsed / 1048576)}`,
+    );
+  }, 30_000);
+}
+
+function stopBridgeDiagnostics(): void {
+  if (bridgeDiagTimer) {
+    clearInterval(bridgeDiagTimer);
+    bridgeDiagTimer = null;
+  }
 }
 
 // ── 管理器（单例）──
@@ -808,6 +873,7 @@ async function handleWorkspaceBridgeOpen(payload: Record<string, unknown>): Prom
     onFault: (fault) => safeLog(`[web-remote-control] rpc transport fault=${fault.reason}`),
   });
   activeBridge = { bridgeSessionId, bridgeGeneration, port: port1, transport };
+  startBridgeDiagnostics(bridgeSessionId);
 
   port1.on("message", (event: { data: unknown }) => {
     const bridge = activeBridge;
@@ -819,8 +885,15 @@ async function handleWorkspaceBridgeOpen(payload: Record<string, unknown>): Prom
       safeLog(`[web-remote-control] host port control payload ignored type=${typeof raw}`);
       return;
     }
-    bridge.transport.send(bytes);
-    safeLog(`[web-remote-control] host→relay rpc message bytes=${bytes.byteLength}`);
+    try {
+      bridge.transport.send(bytes);
+      safeLog(`[web-remote-control] host→relay rpc message bytes=${bytes.byteLength}`);
+    } catch (err) {
+      // 超 16MiB 的消息在这里抛错；不捕获会成为主进程 uncaught exception。
+      safeLog(
+        `[web-remote-control] host→relay rpc send failed bytes=${bytes.byteLength} error=${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
   });
   port1.start();
   host.postMessage(
@@ -902,6 +975,7 @@ export function startWebRemoteControl(): RelayStatus {
 }
 
 export function stopWebRemoteControl(): void {
+  disposeActiveBridge();
   if (client) {
     client.dispose();
     client = null;
